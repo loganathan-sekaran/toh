@@ -37,7 +37,12 @@ class TowerOfHanoiEnv:
 
             # Check if the game is complete
             if len(self.state[2]) == self.num_discs:
-                reward = 100  # Reward for successfully solving
+                # Reward based on efficiency: higher reward for fewer steps
+                # Optimal steps: 2^n - 1
+                optimal_steps = self.max_steps
+                efficiency_bonus = max(0, (optimal_steps * 2 - self.steps) * 10)
+                base_reward = 100
+                reward = base_reward + efficiency_bonus
                 done = True
             else:
                 done = False

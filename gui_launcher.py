@@ -19,6 +19,7 @@ class TrainingWorker(QObject):
     """Worker object for running training in a separate thread."""
     finished = pyqtSignal(str)  # Emits completion message
     progress = pyqtSignal(int, float, float)  # episode, epsilon, success_rate
+    model_saved = pyqtSignal(str, object)  # model_path, metadata
     
     def __init__(self, env, agent, visualizer, config):
         super().__init__()
@@ -27,13 +28,19 @@ class TrainingWorker(QObject):
         self.visualizer = visualizer
         self.config = config
         self.should_stop = False
+        self.success_count = 0
+        self.total_steps = 0
     
     def run(self):
         """Run the training loop."""
         from util import flatten_state
         import numpy as np
+        from model_manager import ModelManager
         
         state_size = np.prod(self.env.observation_space.shape)
+        self.success_count = 0
+        self.total_steps = 0
+        episode_steps_list = []
         
         for episode in range(1, self.config['episodes'] + 1):
             if self.should_stop or self.visualizer.should_stop:
@@ -76,14 +83,41 @@ class TrainingWorker(QObject):
                     self.visualizer.update_state(self.env.state)
                     self.visualizer.update_info(episode=episode, step=steps, reward=total_reward, epsilon=self.agent.epsilon)
             
+            # Track success
+            success = (len(self.env.state[2]) == self.config['num_discs'])
+            if success:
+                self.success_count += 1
+            episode_steps_list.append(steps)
+            self.total_steps += steps
+            
+            # Calculate success rate
+            success_rate = (self.success_count / episode) * 100
+            
             # Emit progress signal
-            self.progress.emit(episode, self.agent.epsilon, 0.0)
+            self.progress.emit(episode, self.agent.epsilon, success_rate)
             
             # Train agent
             if len(self.agent.memory) > self.config.get('batch_size', 32):
                 self.agent.replay()
         
-        self.finished.emit(f"Training completed {self.config['episodes']} episodes!")
+        # Save model after training
+        model_manager = ModelManager()
+        avg_steps = self.total_steps / self.config['episodes']
+        success_rate = (self.success_count / self.config['episodes']) * 100
+        
+        metadata = {
+            'episodes': self.config['episodes'],
+            'num_discs': self.config['num_discs'],
+            'success_rate': success_rate,
+            'avg_steps': avg_steps,
+            'final_epsilon': float(self.agent.epsilon),
+            'total_steps': self.total_steps
+        }
+        
+        model_dir = model_manager.save_model(self.agent, metadata=metadata)
+        self.model_saved.emit(str(model_dir), metadata)
+        
+        self.finished.emit(f"Training completed {self.config['episodes']} episodes! Model saved.")
     
     def stop(self):
         """Stop the training."""
@@ -101,6 +135,7 @@ class MainLauncher(QMainWindow):
         # Training worker and thread
         self.training_thread = None
         self.training_worker = None
+        self.current_agent = None  # Store current agent for architecture display
         
         # Create central widget with stacked layout
         central_widget = QWidget()
@@ -368,11 +403,16 @@ class MainLauncher(QMainWindow):
             env = TowerOfHanoiEnv(num_discs=config['num_discs'])
             state_size = np.prod(env.observation_space.shape)
             action_size = env.action_space.n
-            agent = DQNAgent(state_size, action_size)
+            
+            # Create agent with selected architecture
+            agent = DQNAgent(state_size, action_size, architecture_name=config['architecture'])
             
             # Create visualizer and show it
             visualizer = TowerOfHanoiVisualizer(env, num_discs=config['num_discs'], standalone=False)
             self.show_visualization_page(visualizer)
+            
+            # Store agent for later access
+            self.current_agent = agent
             
             # Create worker and thread
             self.training_worker = TrainingWorker(env, agent, visualizer, config)
@@ -383,6 +423,7 @@ class MainLauncher(QMainWindow):
             self.training_thread.started.connect(self.training_worker.run)
             self.training_worker.progress.connect(self.on_training_progress)
             self.training_worker.finished.connect(self.on_training_finished)
+            self.training_worker.model_saved.connect(self.on_model_saved)
             self.training_worker.finished.connect(self.training_thread.quit)
             
             # Store references for updates
@@ -401,14 +442,143 @@ class MainLauncher(QMainWindow):
         """Handle training completion (runs on main thread)."""
         QMessageBox.information(self, "Training Complete", message)
     
+    def on_model_saved(self, model_path, metadata):
+        """Handle model save completion - show architecture"""
+        if self.current_agent and self.current_agent.model:
+            reply = QMessageBox.question(
+                self,
+                "Model Saved",
+                f"Model saved successfully!\n\nSuccess Rate: {metadata.get('success_rate', 0):.1f}%\n"
+                f"Avg Steps: {metadata.get('avg_steps', 0):.1f}\n\n"
+                "Would you like to view the model architecture?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                self.show_model_architecture(self.current_agent.model, metadata)
+    
     def on_test(self):
         """Show model selection dialog for testing."""
-        dialog = ModelSelectionDialog(self, title="Test Model")
+        from model_selection_dialog import ModelSelectionDialog
+        from model_manager import ModelManager
+        
+        dialog = ModelSelectionDialog(self, auto_select_latest=True)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            model_path = dialog.get_selected_model()
-            if model_path:
-                from test_model import load_and_test_model
-                load_and_test_model(model_path, num_discs=3, num_episodes=50, visualize=True)
+            model_name, metadata = dialog.get_selected_model()
+            if model_name:
+                # Load the model
+                model_manager = ModelManager()
+                try:
+                    agent, metadata = model_manager.load_model(model_name)
+                    
+                    # Show model architecture
+                    self.show_model_architecture(agent.model, metadata)
+                    
+                    # Run test with visualization
+                    from toh import TowerOfHanoiEnv
+                    from visualizer import TowerOfHanoiVisualizer
+                    from util import flatten_state
+                    import numpy as np
+                    
+                    num_discs = metadata.get('num_discs', 3)
+                    env = TowerOfHanoiEnv(num_discs=num_discs)
+                    visualizer = TowerOfHanoiVisualizer(env, num_discs=num_discs, standalone=False)
+                    
+                    self.show_visualization_page(visualizer)
+                    
+                    # Run test episode
+                    self.run_test_episode(env, agent, visualizer, num_discs)
+                    
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to load model:\n{str(e)}")
+    
+    def show_model_architecture(self, model, metadata):
+        """Show model architecture in a dialog"""
+        from model_visualizer import ModelVisualizerWidget
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Model Architecture")
+        dialog.setMinimumSize(900, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Model info
+        info_text = f"<b>Model:</b> {metadata.get('name', 'Unknown')}<br>"
+        info_text += f"<b>Episodes Trained:</b> {metadata.get('episodes', '-')}<br>"
+        info_text += f"<b>Success Rate:</b> {metadata.get('success_rate', '-'):.1f}%<br>"
+        info_text += f"<b>Avg Steps:</b> {metadata.get('avg_steps', '-'):.1f}"
+        
+        info_label = QLabel(info_text)
+        info_label.setFont(QFont("Arial", 11))
+        layout.addWidget(info_label)
+        
+        # Model visualizer
+        viz = ModelVisualizerWidget()
+        model_info = f"Episodes: {metadata.get('episodes', '-')} | Success: {metadata.get('success_rate', 0):.1f}%"
+        viz.set_model(model, model_info)
+        layout.addWidget(viz)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.exec()
+    
+    def run_test_episode(self, env, agent, visualizer, num_discs):
+        """Run a single test episode with visualization"""
+        from threading import Thread
+        from util import flatten_state
+        import numpy as np
+        import time
+        
+        def test():
+            state = env._reset()
+            visualizer.update_state(env.state)
+            visualizer.update_info(episode=1, step=0, reward=0)
+            time.sleep(1)
+            
+            done = False
+            steps = 0
+            total_reward = 0
+            
+            while not done and steps < 100:
+                flat_state = flatten_state(state, num_discs)
+                flat_state = np.reshape(flat_state, [1, agent.state_size])
+                
+                # Use agent to select action (no exploration)
+                q_values = agent.model.predict(flat_state, verbose=0)
+                action = np.argmax(q_values[0])
+                
+                # Get move details
+                from_rod, to_rod = env.decode_action(action)
+                disc = env.state[from_rod][-1] if env.state[from_rod] else None
+                
+                # Execute action
+                next_state, reward, done, _ = env.step(action)
+                total_reward += reward
+                steps += 1
+                
+                # Visualize
+                if disc:
+                    visualizer.animate_move(from_rod, to_rod, disc)
+                    visualizer.update_state(env.state)
+                    visualizer.update_info(episode=1, step=steps, reward=total_reward)
+                
+                state = next_state
+                
+                if done:
+                    success = (len(env.state[2]) == num_discs)
+                    if success:
+                        QMessageBox.information(visualizer, "Success!", 
+                                              f"Model solved the puzzle in {steps} steps!")
+                    else:
+                        QMessageBox.warning(visualizer, "Failed", 
+                                          f"Model failed to solve the puzzle in {steps} steps.")
+                    break
+        
+        test_thread = Thread(target=test, daemon=True)
+        test_thread.start()
     
     def on_quick_train(self):
         """Run quick training."""
@@ -475,12 +645,38 @@ class TrainingDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Configure Training")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(500)
         
         layout = QVBoxLayout(self)
         
         # Form layout for parameters
         form = QFormLayout()
+        
+        # Model Architecture Selection
+        from model_architectures import ModelFactory
+        from PyQt6.QtWidgets import QComboBox
+        
+        self.architecture_combo = QComboBox()
+        architectures = ModelFactory.get_all_architectures()
+        for arch_name, arch_instance in sorted(architectures.items()):
+            info = arch_instance.get_info()
+            display_text = f"{arch_name} - {info['complexity']}"
+            self.architecture_combo.addItem(display_text, arch_name)
+        
+        # Set default to Large
+        for i in range(self.architecture_combo.count()):
+            if "Large (128-64-32)" in self.architecture_combo.itemData(i):
+                self.architecture_combo.setCurrentIndex(i)
+                break
+        
+        self.architecture_combo.currentIndexChanged.connect(self.on_architecture_changed)
+        form.addRow("Model Architecture:", self.architecture_combo)
+        
+        # Architecture description
+        self.arch_description = QLabel()
+        self.arch_description.setWordWrap(True)
+        self.arch_description.setStyleSheet("color: #555; font-size: 10px; padding: 5px;")
+        form.addRow("", self.arch_description)
         
         self.num_discs_spin = QSpinBox()
         self.num_discs_spin.setRange(3, 5)
@@ -501,10 +697,13 @@ class TrainingDialog(QDialog):
         
         layout.addLayout(form)
         
+        # Update description for initial selection
+        self.on_architecture_changed()
+        
         # Info label
         info = QLabel(
-            "💡 Tip: More episodes = better learning but longer training time.\n"
-            "Start with 1000 episodes for 3 discs."
+            "💡 Tip: Larger models learn better but train slower.\n"
+            "Start with Large (128-64-32) for best results."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #666; padding: 10px; background-color: #f0f0f0; border-radius: 5px;")
@@ -518,9 +717,25 @@ class TrainingDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
     
+    def on_architecture_changed(self):
+        """Update description when architecture selection changes."""
+        from model_architectures import ModelFactory
+        
+        arch_name = self.architecture_combo.currentData()
+        if arch_name:
+            info = ModelFactory.get_architecture_info(arch_name)
+            desc_text = f"{info['description']}\n"
+            desc_text += f"Complexity: {info['complexity']} | "
+            desc_text += f"Recommended Episodes: {info['recommended_episodes']}"
+            self.arch_description.setText(desc_text)
+            
+            # Auto-adjust episodes recommendation
+            self.episodes_spin.setValue(info['recommended_episodes'])
+    
     def get_config(self):
         """Get training configuration."""
         return {
+            'architecture': self.architecture_combo.currentData(),
             'num_discs': self.num_discs_spin.value(),
             'episodes': self.episodes_spin.value(),
             'batch_size': self.batch_spin.value()

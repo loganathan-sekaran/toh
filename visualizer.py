@@ -310,14 +310,11 @@ class TowerOfHanoiVisualizer(QMainWindow):
             self.viz_button.setText("Hide Visualization (Fast Training)")
             self.viz_button.setStyleSheet("background-color: #4CAF50; color: white;")
             # Immediately show the current state when enabling visualization
-            # Use update() instead of repaint() to avoid QPainter errors
             self.canvas.set_state(self.env.state)
             QApplication.processEvents()
-            print(f"[Visualization ON] Current state: {self.env.state}")
         else:
             self.viz_button.setText("Show Visualization (Currently Fast)")
             self.viz_button.setStyleSheet("background-color: #FF9800; color: white;")
-            print(f"[Visualization OFF] Fast training mode enabled")
             QApplication.processEvents()
     
     def stop_training(self):
@@ -341,13 +338,11 @@ class TowerOfHanoiVisualizer(QMainWindow):
         # If visualization is hidden, skip animation for fast training
         if not self.show_visualization:
             # Just update the final state without animation
-            # Don't force immediate repaint - let Qt handle it naturally
             self.canvas.set_state(self.env.state)
             QApplication.processEvents()
             return
         
         # Visualization is ON - perform full animation
-        print(f"[Animating] Move disc {disc} from rod {from_rod} to rod {to_rod}")
         self.canvas.start_animation(from_rod, to_rod, disc)
         
         # Render each frame of the animation
