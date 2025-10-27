@@ -8,7 +8,7 @@ from model_architectures import ModelFactory
 
 
 class DQNAgent:
-    def __init__(self, state_size, action_size, architecture_name="Large (128-64-32)"):
+    def __init__(self, state_size, action_size, architecture_name="Medium (64-32)"):
         """
         Initialize DQN Agent with a specific model architecture.
         
@@ -25,12 +25,17 @@ class DQNAgent:
         self.gamma = 0.90  # Lower discount to prioritize immediate rewards/penalties
         self.epsilon = 0.5  # Start with 50% exploitation (was 1.0 - too much random exploration)
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995  # Decay to min over ~500 episodes
-        self.learning_rate = 0.001  # Higher learning rate for faster learning
+        self.epsilon_decay = 0.99  # Faster decay to reach min in ~100 episodes (was 0.995)
+        self.learning_rate = 0.003  # Increased for faster learning from penalties (was 0.001)
         self.batch_size = 64  # Larger batch for more stable learning (was 32)
+        self.penalty_scale = 2.0  # Scale penalties by this factor when storing in memory
 
         # Replay memory
         self.memory = deque(maxlen=10000)  # Larger memory for better learning
+        
+        # Oscillation detection - track recent actions to provide feedback
+        self.recent_actions = deque(maxlen=20)  # Track last 20 actions
+        self.oscillation_threshold = 6  # If same pattern repeats in 6 actions, warn about oscillation
 
         # Get the model architecture
         self.architecture = ModelFactory.get_architecture(architecture_name)
@@ -57,24 +62,69 @@ class DQNAgent:
     def update_target_model(self):
         """Copy weights from main model to target model."""
         self.target_model.set_weights(self.model.get_weights())
+    
+    def reset_episode(self):
+        """Reset episode-specific tracking (call at start of each episode)."""
+        self.recent_actions.clear()
 
     def remember(self, state, action, reward, next_state, done):
-        """Store experiences in memory."""
-        self.memory.append((state, action, reward, next_state, done))
+        """
+        Store experiences in memory.
+        Applies penalty scaling to amplify negative rewards for faster learning.
+        """
+        # Scale penalties (negative rewards) to make them more impactful
+        if reward < 0:
+            scaled_reward = reward * self.penalty_scale
+        else:
+            scaled_reward = reward
+        
+        self.memory.append((state, action, scaled_reward, next_state, done))
 
     def act(self, state, valid_actions=None):
         """
         Choose an action based on the epsilon-greedy policy.
+        Includes oscillation detection to provide feedback.
         
         Args:
             state: Current state
             valid_actions: Optional list of valid action indices. If provided, only these actions will be considered.
+            
+        Returns:
+            action: The selected action index
         """
+        # Check for oscillation patterns and provide warning feedback
+        if len(self.recent_actions) >= self.oscillation_threshold:
+            last_actions = list(self.recent_actions)[-self.oscillation_threshold:]
+            
+            # Check for repetitive single action: A,A,A,A,A,A...
+            if len(set(last_actions)) == 1:
+                oscillating_action = last_actions[0]
+                print(f"⚠️  REPETITIVE ACTION: action {oscillating_action} repeated {self.oscillation_threshold} times")
+            
+            # Check for alternating 2-action pattern: A,B,A,B,A,B...
+            elif len(set(last_actions)) == 2:
+                is_alternating = all(
+                    last_actions[i] != last_actions[i+1] 
+                    for i in range(len(last_actions)-1)
+                )
+                if is_alternating:
+                    print(f"⚠️  OSCILLATION: 2-action cycle detected")
+            
+            # Check for 3-action cycle: A,B,C,A,B,C...
+            elif len(set(last_actions)) == 3 and len(last_actions) >= 6:
+                mid = len(last_actions) // 2
+                if last_actions[:mid] == last_actions[mid:mid*2]:
+                    print(f"⚠️  3-ACTION CYCLE: pattern repeating")
+        
         if np.random.rand() <= self.epsilon:
             # Explore: choose random action (only from valid actions if provided)
             if valid_actions is not None and len(valid_actions) > 0:
-                return random.choice(valid_actions)
-            return random.randrange(self.action_size)
+                action = random.choice(valid_actions)
+                self.recent_actions.append(action)
+                return action
+            action = random.randrange(self.action_size)
+            self.recent_actions.append(action)
+            return action
         
         # Exploit: choose best action
         q_values = self.model.predict(state, verbose=0)[0]
@@ -85,9 +135,14 @@ class DQNAgent:
             masked_q_values = np.full(self.action_size, -np.inf)
             for action in valid_actions:
                 masked_q_values[action] = q_values[action]
-            return np.argmax(masked_q_values)
+            
+            action = np.argmax(masked_q_values)
+            self.recent_actions.append(action)
+            return action
         
-        return np.argmax(q_values)
+        action = np.argmax(q_values)
+        self.recent_actions.append(action)
+        return action
 
     def replay(self):
         """Train the model using experiences in replay memory with target network."""

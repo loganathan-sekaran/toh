@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 
 def train_tower_of_hanoi(env, agent, episodes=500):
     for e in range(episodes):
+        # Reset episode-specific agent state
+        agent.reset_episode()
+        
         state = env._reset()
         state = flatten_and_reshape(state, num_discs, agent)  # Flatten the state
         total_reward = 0

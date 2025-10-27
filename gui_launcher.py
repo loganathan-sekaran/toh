@@ -51,6 +51,9 @@ class TrainingWorker(QObject):
                 self.finished.emit("Training stopped by user")
                 return
             
+            # Reset episode-specific agent state
+            self.agent.reset_episode()
+            
             state = self.env._reset()
             done = False
             steps = 0
