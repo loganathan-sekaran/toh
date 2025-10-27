@@ -48,7 +48,8 @@ class ModelFactory:
                         cls._architectures[instance.name] = obj
                         
             except Exception as e:
-                print(f"Warning: Failed to load architecture from {file.stem}: {e}")
+                # Silently skip - print() not thread-safe in PyQt6
+                pass
         
         cls._initialized = True
     

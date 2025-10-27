@@ -4,6 +4,7 @@ Provides a modern PyQt6 interface with integrated visualization.
 """
 import sys
 import os
+import copy
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -11,7 +12,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QMessageBox, QProgressBar, QTableWidget, QTableWidgetItem,
     QHeaderView, QSpinBox, QFormLayout, QCheckBox, QStackedWidget
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QMetaObject
 from PyQt6.QtGui import QFont, QPalette, QColor
 
 
@@ -20,6 +21,9 @@ class TrainingWorker(QObject):
     finished = pyqtSignal(str)  # Emits completion message
     progress = pyqtSignal(int, float, float)  # episode, epsilon, success_rate
     model_saved = pyqtSignal(str, object)  # model_path, metadata
+    update_info = pyqtSignal(dict)  # GUI update data (episode, step, reward, epsilon)
+    update_state = pyqtSignal(object)  # Environment state update
+    animate_move = pyqtSignal(int, int, int)  # from_rod, to_rod, disc
     
     def __init__(self, env, agent, visualizer, config):
         super().__init__()
@@ -53,22 +57,29 @@ class TrainingWorker(QObject):
             total_reward = 0
             
             # Update visualizer at start of episode
-            self.visualizer.update_state(self.env.state)
-            self.visualizer.update_info(episode=episode, step=0, reward=0, epsilon=self.agent.epsilon)
+            self.update_state.emit(copy.deepcopy(self.env.state))
+            self.update_info.emit({'episode': episode, 'step': 0, 'reward': 0, 'epsilon': self.agent.epsilon})
             
             while not done and steps < 1000:
                 flat_state = flatten_state(state, self.config['num_discs'])
                 flat_state = np.reshape(flat_state, [1, state_size])
                 
-                action = self.agent.act(flat_state)
+                # Get valid actions to avoid learning from invalid moves
+                valid_actions = self.env.get_valid_actions()
+                action = self.agent.act(flat_state, valid_actions)
                 
-                # Get move details for visualization
+                # Get move details for visualization BEFORE executing step
                 from_rod, to_rod = self.env.decode_action(action)
                 disc = self.env.state[from_rod][-1] if self.env.state[from_rod] else None
                 
-                # Execute action
+                # Execute action (this modifies env.state)
                 next_state, reward, done, _ = self.env.step(action)
                 total_reward += reward
+                
+                # Log significant rewards/penalties for debugging
+                if abs(reward) > 5:  # Log notable rewards
+                    reward_type = "REWARD" if reward > 0 else "PENALTY"
+                    print(f"Episode {episode}, Step {steps}: {reward_type} = {reward:.1f} (action: {from_rod}→{to_rod}, disc: {disc})")
                 
                 flat_next_state = flatten_state(next_state, self.config['num_discs'])
                 flat_next_state = np.reshape(flat_next_state, [1, state_size])
@@ -77,11 +88,22 @@ class TrainingWorker(QObject):
                 state = next_state
                 steps += 1
                 
+                # Train agent after each step if enough memory
+                if len(self.agent.memory) > self.config.get('batch_size', 64):
+                    self.agent.replay()
+                
                 # Visualize the move
                 if disc:
-                    self.visualizer.animate_move(from_rod, to_rod, disc)
-                    self.visualizer.update_state(self.env.state)
-                    self.visualizer.update_info(episode=episode, step=steps, reward=total_reward, epsilon=self.agent.epsilon)
+                    self.animate_move.emit(from_rod, to_rod, disc)
+                    self.update_state.emit(copy.deepcopy(self.env.state))
+                    self.update_info.emit({'episode': episode, 'step': steps, 'reward': total_reward, 'epsilon': self.agent.epsilon})
+                    
+                    # If visualization is enabled, add a small delay to allow animation to render
+                    # This is checked via the visualizer's show_visualization flag
+                    if self.visualizer.show_visualization:
+                        import time
+                        # Wait for animation to complete (animation_speed * animation_frames)
+                        time.sleep((self.visualizer.animation_speed * self.visualizer.animation_frames) / 1000.0)
             
             # Track success
             success = (len(self.env.state[2]) == self.config['num_discs'])
@@ -96,9 +118,7 @@ class TrainingWorker(QObject):
             # Emit progress signal
             self.progress.emit(episode, self.agent.epsilon, success_rate)
             
-            # Train agent
-            if len(self.agent.memory) > self.config.get('batch_size', 32):
-                self.agent.replay()
+            # Note: Agent training now happens after each step, not per episode
         
         # Save model after training
         model_manager = ModelManager()
@@ -347,7 +367,6 @@ class MainLauncher(QMainWindow):
         from toh import TowerOfHanoiEnv
         from visualizer import TowerOfHanoiVisualizer
         import time
-        from threading import Thread
         
         env = TowerOfHanoiEnv(num_discs=3)
         visualizer = TowerOfHanoiVisualizer(env, num_discs=3, standalone=False)
@@ -369,23 +388,55 @@ class MainLauncher(QMainWindow):
         
         state = [[3, 2, 1], [], []]
         visualizer.update_state(state)
-        visualizer.update_info(episode=1, step=0, reward=0)
+        visualizer.update_info({'episode': 1, 'step': 0, 'reward': 0})
         
-        def run_demo():
-            time.sleep(1)
-            for i, (from_rod, to_rod) in enumerate(moves):
-                if visualizer.should_stop:
-                    break
-                disc = state[from_rod][-1]
-                state[from_rod].pop()
-                visualizer.animate_move(from_rod, to_rod, disc)
-                state[to_rod].append(disc)
-                visualizer.update_state(state)
-                visualizer.update_info(step=i+1, reward=-(i+1))
-                time.sleep(0.3)
+        # Create a demo worker that emits signals
+        class DemoWorker(QObject):
+            animate_move_signal = pyqtSignal(int, int, int)
+            update_state_signal = pyqtSignal(object)
+            update_info_signal = pyqtSignal(dict)
+            finished = pyqtSignal()
+            
+            def __init__(self, moves, state, visualizer):
+                super().__init__()
+                self.moves = moves
+                self.state = [list(rod) for rod in state]  # Deep copy
+                self.visualizer = visualizer
+            
+            def run(self):
+                import time
+                time.sleep(1)
+                for i, (from_rod, to_rod) in enumerate(self.moves):
+                    if self.visualizer.should_stop:
+                        break
+                    disc = self.state[from_rod][-1]
+                    self.state[from_rod].pop()
+                    self.animate_move_signal.emit(from_rod, to_rod, disc)
+                    self.state[to_rod].append(disc)
+                    time.sleep(0.3)
+                    self.update_state_signal.emit([list(rod) for rod in self.state])
+                    self.update_info_signal.emit({'step': i+1, 'reward': -(i+1)})
+                    time.sleep(0.3)
+                self.finished.emit()
         
-        demo_thread = Thread(target=run_demo, daemon=True)
-        demo_thread.start()
+        worker = DemoWorker(moves, state, visualizer)
+        thread = QThread()
+        worker.moveToThread(thread)
+        
+        # Connect signals
+        thread.started.connect(worker.run)
+        worker.animate_move_signal.connect(visualizer.animate_move)
+        worker.update_state_signal.connect(visualizer.update_state)
+        worker.update_info_signal.connect(visualizer.update_info)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        
+        # Store references to prevent garbage collection
+        self.demo_worker = worker
+        self.demo_thread = thread
+        
+        thread.start()
     
     def on_train(self):
         """Show training configuration dialog and start training in same window."""
@@ -424,6 +475,9 @@ class MainLauncher(QMainWindow):
             self.training_worker.progress.connect(self.on_training_progress)
             self.training_worker.finished.connect(self.on_training_finished)
             self.training_worker.model_saved.connect(self.on_model_saved)
+            self.training_worker.update_info.connect(visualizer.update_info)
+            self.training_worker.update_state.connect(visualizer.update_state)
+            self.training_worker.animate_move.connect(visualizer.animate_move)
             self.training_worker.finished.connect(self.training_thread.quit)
             
             # Store references for updates
@@ -435,7 +489,7 @@ class MainLauncher(QMainWindow):
     def on_training_progress(self, episode, epsilon, success_rate):
         """Handle training progress updates (runs on main thread)."""
         if hasattr(self, 'current_visualizer'):
-            self.current_visualizer.update_info(episode=episode, epsilon=epsilon, success_rate=success_rate)
+            self.current_visualizer.update_info({'episode': episode, 'epsilon': epsilon, 'success_rate': success_rate})
             QApplication.processEvents()
     
     def on_training_finished(self, message):
@@ -527,58 +581,94 @@ class MainLauncher(QMainWindow):
     
     def run_test_episode(self, env, agent, visualizer, num_discs):
         """Run a single test episode with visualization"""
-        from threading import Thread
         from util import flatten_state
         import numpy as np
-        import time
         
-        def test():
-            state = env._reset()
-            visualizer.update_state(env.state)
-            visualizer.update_info(episode=1, step=0, reward=0)
-            time.sleep(1)
+        class TestWorker(QObject):
+            animate_move_signal = pyqtSignal(int, int, int)
+            update_state_signal = pyqtSignal(object)
+            update_info_signal = pyqtSignal(dict)
+            show_message = pyqtSignal(str, str, bool)  # title, message, success
+            finished = pyqtSignal()
             
-            done = False
-            steps = 0
-            total_reward = 0
+            def __init__(self, env, agent, num_discs):
+                super().__init__()
+                self.env = env
+                self.agent = agent
+                self.num_discs = num_discs
             
-            while not done and steps < 100:
-                flat_state = flatten_state(state, num_discs)
-                flat_state = np.reshape(flat_state, [1, agent.state_size])
+            def run(self):
+                import time
+                state = self.env._reset()
+                self.update_state_signal.emit(self.env.state)
+                self.update_info_signal.emit({'episode': 1, 'step': 0, 'reward': 0})
+                time.sleep(1)
                 
-                # Use agent to select action (no exploration)
-                q_values = agent.model.predict(flat_state, verbose=0)
-                action = np.argmax(q_values[0])
+                done = False
+                steps = 0
+                total_reward = 0
                 
-                # Get move details
-                from_rod, to_rod = env.decode_action(action)
-                disc = env.state[from_rod][-1] if env.state[from_rod] else None
+                while not done and steps < 100:
+                    flat_state = flatten_state(state, self.num_discs)
+                    flat_state = np.reshape(flat_state, [1, self.agent.state_size])
+                    
+                    # Use agent to select action (no exploration)
+                    q_values = self.agent.model.predict(flat_state, verbose=0)
+                    action = np.argmax(q_values[0])
+                    
+                    # Get move details
+                    from_rod, to_rod = self.env.decode_action(action)
+                    disc = self.env.state[from_rod][-1] if self.env.state[from_rod] else None
+                    
+                    # Execute action
+                    next_state, reward, done, _ = self.env.step(action)
+                    total_reward += reward
+                    steps += 1
+                    
+                    # Visualize
+                    if disc:
+                        self.animate_move_signal.emit(from_rod, to_rod, disc)
+                        time.sleep(0.3)
+                        self.update_state_signal.emit([list(rod) for rod in self.env.state])
+                        self.update_info_signal.emit({'episode': 1, 'step': steps, 'reward': total_reward})
+                    
+                    state = next_state
+                    
+                    if done:
+                        success = (len(self.env.state[2]) == self.num_discs)
+                        if success:
+                            self.show_message.emit("Success!", 
+                                                  f"Model solved the puzzle in {steps} steps!",
+                                                  True)
+                        else:
+                            self.show_message.emit("Failed", 
+                                                  f"Model failed to solve the puzzle in {steps} steps.",
+                                                  False)
+                        break
                 
-                # Execute action
-                next_state, reward, done, _ = env.step(action)
-                total_reward += reward
-                steps += 1
-                
-                # Visualize
-                if disc:
-                    visualizer.animate_move(from_rod, to_rod, disc)
-                    visualizer.update_state(env.state)
-                    visualizer.update_info(episode=1, step=steps, reward=total_reward)
-                
-                state = next_state
-                
-                if done:
-                    success = (len(env.state[2]) == num_discs)
-                    if success:
-                        QMessageBox.information(visualizer, "Success!", 
-                                              f"Model solved the puzzle in {steps} steps!")
-                    else:
-                        QMessageBox.warning(visualizer, "Failed", 
-                                          f"Model failed to solve the puzzle in {steps} steps.")
-                    break
+                self.finished.emit()
         
-        test_thread = Thread(target=test, daemon=True)
-        test_thread.start()
+        worker = TestWorker(env, agent, num_discs)
+        thread = QThread()
+        worker.moveToThread(thread)
+        
+        # Connect signals
+        thread.started.connect(worker.run)
+        worker.animate_move_signal.connect(visualizer.animate_move)
+        worker.update_state_signal.connect(visualizer.update_state)
+        worker.update_info_signal.connect(visualizer.update_info)
+        worker.show_message.connect(lambda title, msg, success: 
+            QMessageBox.information(visualizer, title, msg) if success 
+            else QMessageBox.warning(visualizer, title, msg))
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        
+        # Store references
+        self.test_worker = worker
+        self.test_thread = thread
+        
+        thread.start()
     
     def on_quick_train(self):
         """Run quick training."""
@@ -615,6 +705,9 @@ class MainLauncher(QMainWindow):
             self.training_thread.started.connect(self.training_worker.run)
             self.training_worker.progress.connect(self.on_training_progress)
             self.training_worker.finished.connect(self.on_training_finished)
+            self.training_worker.update_info.connect(visualizer.update_info)
+            self.training_worker.update_state.connect(visualizer.update_state)
+            self.training_worker.animate_move.connect(visualizer.animate_move)
             self.training_worker.finished.connect(self.training_thread.quit)
             
             # Store references for updates
@@ -670,7 +763,29 @@ class TrainingDialog(QDialog):
                 break
         
         self.architecture_combo.currentIndexChanged.connect(self.on_architecture_changed)
-        form.addRow("Model Architecture:", self.architecture_combo)
+        
+        # Architecture row with preview button
+        arch_layout = QHBoxLayout()
+        arch_layout.addWidget(self.architecture_combo, stretch=3)
+        
+        preview_btn = QPushButton("👁️ Preview")
+        preview_btn.setToolTip("Preview the neural network architecture")
+        preview_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                border: none;
+                padding: 5px 15px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        preview_btn.clicked.connect(self.preview_architecture)
+        arch_layout.addWidget(preview_btn, stretch=1)
+        
+        form.addRow("Model Architecture:", arch_layout)
         
         # Architecture description
         self.arch_description = QLabel()
@@ -731,6 +846,93 @@ class TrainingDialog(QDialog):
             
             # Auto-adjust episodes recommendation
             self.episodes_spin.setValue(info['recommended_episodes'])
+    
+    def preview_architecture(self):
+        """Show a preview of the selected architecture."""
+        from model_architectures import ModelFactory
+        from dqn_agent import DQNAgent
+        from model_visualizer import ModelVisualizerWidget
+        import numpy as np
+        
+        arch_name = self.architecture_combo.currentData()
+        if not arch_name:
+            return
+        
+        try:
+            # Get architecture info
+            info = ModelFactory.get_architecture_info(arch_name)
+            
+            # Create a temporary agent with this architecture
+            num_discs = self.num_discs_spin.value()
+            state_size = num_discs * 3  # 3 rods, each with num_discs positions
+            action_size = 6  # 6 possible moves between 3 rods
+            
+            temp_agent = DQNAgent(state_size, action_size, architecture_name=arch_name)
+            
+            # Create preview dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Architecture Preview: {arch_name}")
+            dialog.setMinimumSize(900, 650)
+            
+            layout = QVBoxLayout(dialog)
+            
+            # Info section
+            info_text = f"<h3>{arch_name}</h3>"
+            info_text += f"<p><b>Description:</b> {info['description']}</p>"
+            info_text += f"<p><b>Complexity:</b> {info['complexity']} | "
+            info_text += f"<b>Parameters:</b> {temp_agent.model.count_params():,} | "
+            info_text += f"<b>Recommended Episodes:</b> {info['recommended_episodes']}</p>"
+            
+            info_label = QLabel(info_text)
+            info_label.setWordWrap(True)
+            info_label.setFont(QFont("Arial", 11))
+            info_label.setStyleSheet("padding: 10px; background-color: #f8f9fa; border-radius: 5px;")
+            layout.addWidget(info_label)
+            
+            # Model visualizer
+            viz = ModelVisualizerWidget()
+            viz_info = f"State Size: {state_size} | Action Size: {action_size} | {temp_agent.model.count_params():,} parameters"
+            viz.set_model(temp_agent.model, viz_info)
+            layout.addWidget(viz)
+            
+            # Layer details
+            layers_text = "<b>Layer Details:</b><br>"
+            for i, layer in enumerate(temp_agent.model.layers):
+                layer_type = layer.__class__.__name__
+                if hasattr(layer, 'units'):
+                    layers_text += f"• Layer {i+1}: {layer_type} - {layer.units} units"
+                    if hasattr(layer, 'activation'):
+                        layers_text += f" ({layer.activation.__name__})"
+                    layers_text += "<br>"
+                elif layer_type == 'Dropout':
+                    layers_text += f"• Layer {i+1}: Dropout - rate {layer.rate}<br>"
+            
+            details_label = QLabel(layers_text)
+            details_label.setWordWrap(True)
+            details_label.setFont(QFont("Arial", 10))
+            details_label.setStyleSheet("padding: 10px; background-color: #fff; border: 1px solid #ddd; border-radius: 5px;")
+            layout.addWidget(details_label)
+            
+            # Close button
+            close_btn = QPushButton("Close")
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    padding: 8px 20px;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #5a6268;
+                }
+            """)
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+            
+            dialog.exec()
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Preview Error", f"Could not preview architecture:\n{str(e)}")
     
     def get_config(self):
         """Get training configuration."""

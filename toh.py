@@ -10,6 +10,15 @@ class TowerOfHanoiEnv:
         self.num_discs = num_discs
         self.state = None  # Initialize the state variable
         self.max_steps = 2 ** num_discs - 1  # Optimal moves for Tower of Hanoi
+        
+        # Learning enhancements - track performance and patterns
+        self.best_steps = float('inf')  # Track best performance across episodes
+        self.recent_moves = []  # Track last few moves to detect loops
+        self.max_recent_moves = 6  # Window for detecting repetition (increased for sequence detection)
+        self.largest_disc = num_discs  # The largest disc number
+        self.largest_disc_on_target = False  # Track if largest disc reached target
+        self.move_sequence_history = []  # Track sequences of moves for pattern detection
+        
         self._reset()
 
         # Define observation space as a Box
@@ -22,34 +31,146 @@ class TowerOfHanoiEnv:
         """Reset the environment to the initial state."""
         self.state = [[i for i in range(self.num_discs, 0, -1)], [], []]
         self.steps = 0
+        self.recent_moves = []  # Clear move history for new episode
+        self.largest_disc_on_target = False  # Reset largest disc tracking
+        self.move_sequence_history = []  # Clear sequence history for new episode
         return self.state
 
     def step(self, action):
-        """Apply an action and return the new state, reward, and done flag."""
+        """
+        Apply an action and return the new state, reward, and done flag.
+        
+        Sophisticated reward shaping based on learning logic:
+        1. Penalize moving disc on larger disc (invalid move)
+        2. Penalize moving largest disc to non-target rod
+        3. Reward efficiency - fewer steps than best so far
+        4. Penalize repetitive moves (oscillating between rods)
+        """
         from_rod, to_rod = self.decode_action(action)
-        reward = -1  # Penalize for each step
+        
+        # Store previous state for reward shaping
+        prev_discs_on_goal = len(self.state[2])
+        
+        reward = -0.1  # Small base penalty to encourage efficiency
+        done = False
 
-        if self.is_valid_move(from_rod, to_rod):
-            # Perform the move
-            disc = self.state[from_rod].pop()
-            self.state[to_rod].append(disc)
-            self.steps += 1
-
-            # Check if the game is complete
-            if len(self.state[2]) == self.num_discs:
-                # Reward based on efficiency: higher reward for fewer steps
-                # Optimal steps: 2^n - 1
-                optimal_steps = self.max_steps
-                efficiency_bonus = max(0, (optimal_steps * 2 - self.steps) * 10)
-                base_reward = 100
-                reward = base_reward + efficiency_bonus
-                done = True
-            else:
-                done = False
-        else:
+        # Check if move is valid
+        if not self.is_valid_move(from_rod, to_rod):
+            # LOGIC 1: Moving disc on non-smaller disc (invalid) = HEAVY PENALTY
+            reward = -50
             done = False
-            reward = -10  # Heavier penalty for invalid moves
-
+            return self.state, reward, done, {}
+        
+        # Valid move - execute it
+        disc = self.state[from_rod].pop()
+        self.state[to_rod].append(disc)
+        self.steps += 1
+        
+        # Track the move for repetition detection (LOGIC 4)
+        move = (from_rod, to_rod, disc)
+        reverse_move = (to_rod, from_rod, disc)
+        
+        # Collect all penalties (use max instead of sum to prevent extreme stacking)
+        penalties = []
+        rewards_bonus = []
+        
+        # LOGIC 4: Detect repetitive moves (oscillating between same rods)
+        if len(self.recent_moves) > 0 and reverse_move == self.recent_moves[-1]:
+            penalties.append(10)  # Penalty for immediately reversing last move
+        elif self.recent_moves.count(move) >= 2:
+            penalties.append(8)  # Penalty for repeating same move multiple times
+        
+        # NEW LOGIC 5: Detect repeating sequences of multiple moves
+        # Add current move to sequence history
+        self.move_sequence_history.append(move)
+        if len(self.move_sequence_history) > 12:  # Keep last 12 moves for pattern detection
+            self.move_sequence_history.pop(0)
+        
+        # Check for repeating sequences (2-move, 3-move patterns)
+        if len(self.move_sequence_history) >= 4:
+            # Check for 2-move repeating pattern (A-B-A-B)
+            if (len(self.move_sequence_history) >= 4 and
+                self.move_sequence_history[-1] == self.move_sequence_history[-3] and
+                self.move_sequence_history[-2] == self.move_sequence_history[-4]):
+                penalties.append(15)  # Penalty for 2-move cycle
+        
+        if len(self.move_sequence_history) >= 6:
+            # Check for 3-move repeating pattern (A-B-C-A-B-C)
+            if (self.move_sequence_history[-1] == self.move_sequence_history[-4] and
+                self.move_sequence_history[-2] == self.move_sequence_history[-5] and
+                self.move_sequence_history[-3] == self.move_sequence_history[-6]):
+                penalties.append(20)  # Penalty for 3-move cycle
+        
+        # Add to recent moves history
+        self.recent_moves.append(move)
+        if len(self.recent_moves) > self.max_recent_moves:
+            self.recent_moves.pop(0)
+        
+        # NEW LOGIC 6: Reward keeping largest disc on target, penalize removing it
+        was_largest_on_target = self.largest_disc_on_target
+        is_largest_on_target = self.largest_disc in self.state[2]
+        
+        if is_largest_on_target and not was_largest_on_target:
+            # Just placed largest disc on target
+            rewards_bonus.append(25)  # Big reward for getting it there
+            self.largest_disc_on_target = True
+        elif not is_largest_on_target and was_largest_on_target:
+            # Removed largest disc from target - BAD!
+            penalties.append(30)  # Heavy penalty for undoing progress
+            self.largest_disc_on_target = False
+        elif is_largest_on_target and was_largest_on_target:
+            # Largest disc still on target - good!
+            rewards_bonus.append(2)  # Small bonus for maintaining correct state
+        
+        # LOGIC 2: Largest disc strategy (original logic - now works with Logic 6)
+        if disc == self.largest_disc:
+            if to_rod == 2:
+                rewards_bonus.append(20)  # BIG reward for moving largest disc to target!
+            else:
+                penalties.append(15)  # Penalty for moving largest disc to wrong rod
+        
+        # Apply the MAXIMUM penalty instead of sum (prevents extreme stacking)
+        if penalties:
+            reward -= max(penalties)
+        # Add all reward bonuses (positive stacking is OK)
+        if rewards_bonus:
+            reward += sum(rewards_bonus)
+        
+        # Reward shaping: bonus for moving discs to goal rod
+        new_discs_on_goal = len(self.state[2])
+        if new_discs_on_goal > prev_discs_on_goal:
+            reward += 5  # Bonus for moving a disc to the goal
+            # Extra bonus if disc is in correct position (larger discs should be at bottom)
+            if to_rod == 2 and disc == max(self.state[2]):
+                reward += 3  # Correct placement bonus
+        
+        # Check if puzzle is complete
+        if len(self.state[2]) == self.num_discs:
+            # LOGIC 3: Reward based on efficiency compared to best performance
+            optimal_steps = self.max_steps
+            
+            # Compare with best previous performance
+            if self.steps < self.best_steps:
+                # New best! Huge reward
+                efficiency_bonus = (self.best_steps - self.steps) * 20
+                reward += 100 + efficiency_bonus
+                self.best_steps = self.steps  # Update best
+            elif self.steps == optimal_steps:
+                # Optimal solution!
+                reward += 200
+                self.best_steps = self.steps
+            elif self.steps <= optimal_steps * 1.5:
+                # Good solution (within 50% of optimal)
+                reward += 80
+            else:
+                # Completed but inefficient
+                reward += 50
+            
+            done = True
+        
+        # Clip reward to prevent numerical instability
+        reward = np.clip(reward, -100, 300)
+        
         return self.state, reward, done, {}
 
     def is_valid_move(self, from_rod, to_rod):
@@ -59,6 +180,15 @@ class TowerOfHanoiEnv:
         if not self.state[to_rod]:  # Can always move to an empty rod
             return True
         return self.state[from_rod][-1] < self.state[to_rod][-1]  # Smaller disc on top
+    
+    def get_valid_actions(self):
+        """Get list of valid action indices in current state."""
+        valid_actions = []
+        for action in range(self.action_space.n):
+            from_rod, to_rod = self.decode_action(action)
+            if self.is_valid_move(from_rod, to_rod):
+                valid_actions.append(action)
+        return valid_actions
 
     def decode_action(self, action):
         """Decode an action into (from_rod, to_rod)."""
@@ -77,30 +207,36 @@ class TowerOfHanoiEnv:
 
     def render(self, mode='human'):
         """Visualize the rods and discs using Matplotlib."""
+        # Reuse existing figure or create new one
+        if not hasattr(self, '_fig') or not plt.fignum_exists(self._fig.number):
+            self._fig, self._ax = plt.subplots(figsize=(6, 4))
+            plt.ion()  # Enable interactive mode
+        else:
+            self._ax.clear()
+        
         # Plot the state (rods and discs)
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.set_xlim(-1, 3)
-        ax.set_ylim(0, self.num_discs + 1)
+        self._ax.set_xlim(-1, 3)
+        self._ax.set_ylim(0, self.num_discs + 1)
 
         # Draw rods
         for i in range(3):
-            ax.plot([i, i], [0, self.num_discs], color='black', lw=3)
+            self._ax.plot([i, i], [0, self.num_discs], color='black', lw=3)
 
         # Draw discs
         for i in range(3):
             rod = self.state[i]
             for j, disc in enumerate(rod):
                 disc_width = disc / self.num_discs * 0.8
-                ax.add_patch(plt.Rectangle((i - disc_width/2, j), disc_width, 0.8, 
+                self._ax.add_patch(plt.Rectangle((i - disc_width/2, j), disc_width, 0.8, 
                                           color=f'C{disc % 10}', lw=2, edgecolor='black'))
 
-        ax.set_xticks([0, 1, 2])
-        ax.set_xticklabels(['Rod 1', 'Rod 2', 'Rod 3'])
-        ax.set_yticks(range(self.num_discs + 1))
-        ax.set_title(f'Tower of Hanoi - Step {self.steps}')
+        self._ax.set_xticks([0, 1, 2])
+        self._ax.set_xticklabels(['Rod 1', 'Rod 2', 'Rod 3'])
+        self._ax.set_yticks(range(self.num_discs + 1))
+        self._ax.set_title(f'Tower of Hanoi - Step {self.steps}')
 
         plt.draw()
-        plt.pause(0.1)  # Pause to update the plot window
+        plt.pause(0.01)  # Brief pause to update the plot window
 
     @property
     def observation_space(self):

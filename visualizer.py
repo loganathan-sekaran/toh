@@ -6,7 +6,7 @@ Interactive GUI with animation and training controls
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QHBoxLayout, QPushButton, QLabel, QSlider, QFrame)
-from PyQt6.QtCore import Qt, QTimer, QRectF, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QTimer, QRectF, pyqtSignal, QObject, pyqtSlot
 from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QFont
 import numpy as np
 
@@ -114,10 +114,8 @@ class TowerOfHanoiCanvas(QWidget):
             rod_x = margin + rod_idx * rod_spacing + rod_spacing / 2
             
             for pos_idx, disc in enumerate(rod):
-                # Skip the disc being animated
-                if (self.animating and 
-                    rod_idx == self.animation_from_rod and 
-                    disc == self.animation_disc):
+                # Skip the disc being animated (from BOTH source and destination rods)
+                if self.animating and disc == self.animation_disc:
                     continue
                 
                 disc_width = min_disc_width + (max_disc_width - min_disc_width) * (disc / self.num_discs)
@@ -286,6 +284,11 @@ class TowerOfHanoiVisualizer(QMainWindow):
         # Animation frames for smooth movement
         self.animation_frames = 30  # Frames per animation (30 frames @ 20ms = 600ms per move)
         
+        # Non-blocking animation support
+        self.animation_timer = QTimer()
+        self.animation_timer.timeout.connect(self._animate_frame)
+        self.current_animation = None  # Stores (from_rod, to_rod, disc, current_frame)
+        
         # Training control
         self.should_stop = False
         
@@ -326,61 +329,66 @@ class TowerOfHanoiVisualizer(QMainWindow):
         """Placeholder for testing trained model"""
         print("Test model functionality - to be implemented")
     
+    @pyqtSlot(object)
     def update_state(self, state):
-        """Update the displayed state"""
+        """Update the displayed state (thread-safe slot)"""
         self.canvas.set_state(state)
-        QApplication.processEvents()
     
+    @pyqtSlot(int, int, int)
     def animate_move(self, from_rod, to_rod, disc):
-        """Animate a disc move with smooth frame-by-frame rendering"""
-        import time
-        
+        """Animate a disc move with smooth frame-by-frame rendering (thread-safe slot)"""
         # If visualization is hidden, skip animation for fast training
         if not self.show_visualization:
             # Just update the final state without animation
             self.canvas.set_state(self.env.state)
-            QApplication.processEvents()
             return
         
-        # Visualization is ON - perform full animation
-        self.canvas.start_animation(from_rod, to_rod, disc)
+        # If already animating, wait for it to finish (shouldn't happen with proper worker timing)
+        if self.animation_timer.isActive():
+            self.animation_timer.stop()
         
-        # Render each frame of the animation
-        for frame in range(self.animation_frames):
+        # Start new animation
+        self.canvas.start_animation(from_rod, to_rod, disc)
+        self.current_animation = {'from_rod': from_rod, 'to_rod': to_rod, 'disc': disc, 'frame': 0}
+        self.animation_timer.start(self.animation_speed)
+    
+    def _animate_frame(self):
+        """Process one frame of animation (called by timer)"""
+        if self.current_animation is None:
+            self.animation_timer.stop()
+            return
+        
+        frame = self.current_animation['frame']
+        frame += 1
+        
+        if frame >= self.animation_frames:
+            # Animation complete
+            self.canvas.animation_progress = 1.0
+            self.canvas.end_animation()
+            self.canvas.update()
+            self.animation_timer.stop()
+            self.current_animation = None
+        else:
+            # Update animation progress
             progress = frame / self.animation_frames
-            
-            # Update the animation progress
             self.canvas.animation_progress = progress
             self.canvas.update()
-            
-            # Process Qt events to render the frame
-            QApplication.processEvents()
-            
-            # Sleep for smooth animation
-            time.sleep(self.animation_speed / 1000.0)
-        
-        # End animation with final frame
-        self.canvas.end_animation()
-        self.canvas.update()
-        QApplication.processEvents()
+            self.current_animation['frame'] = frame
     
-    def update_info(self, episode=None, step=None, reward=None, epsilon=None, success_rate=None):
-        """Update the information display"""
+    @pyqtSlot(dict)
+    def update_info(self, data):
+        """Update the information display (thread-safe slot)"""
         # Update metrics labels (always update these for monitoring)
-        if episode is not None:
-            self.episode_label.setText(f"Episode: {episode}")
-        if step is not None:
-            self.step_label.setText(f"Step: {step}")
-        if reward is not None:
-            self.reward_label.setText(f"Reward: {reward:.2f}")
-        if epsilon is not None:
-            self.epsilon_label.setText(f"Epsilon: {epsilon:.3f}")
-        if success_rate is not None:
-            self.success_label.setText(f"Success Rate: {success_rate:.1f}%")
-        
-        # Always process events to keep UI responsive
-        # This is lightweight and ensures UI updates even in fast mode
-        QApplication.processEvents()
+        if 'episode' in data and data['episode'] is not None:
+            self.episode_label.setText(f"Episode: {data['episode']}")
+        if 'step' in data and data['step'] is not None:
+            self.step_label.setText(f"Step: {data['step']}")
+        if 'reward' in data and data['reward'] is not None:
+            self.reward_label.setText(f"Reward: {data['reward']:.2f}")
+        if 'epsilon' in data and data['epsilon'] is not None:
+            self.epsilon_label.setText(f"Epsilon: {data['epsilon']:.3f}")
+        if 'success_rate' in data and data['success_rate'] is not None:
+            self.success_label.setText(f"Success Rate: {data['success_rate']:.1f}%")
     
     def wait_if_paused(self):
         """Block execution while paused"""

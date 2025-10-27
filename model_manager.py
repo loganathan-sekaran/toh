@@ -64,7 +64,7 @@ class ModelManager:
         with open(metadata_path, 'w') as f:
             json.dump(model_metadata, f, indent=2)
         
-        print(f"Model saved to: {model_dir}")
+        # Removed print() - not thread-safe in PyQt6
         return model_dir
     
     def load_model(self, name, agent=None):
@@ -117,7 +117,7 @@ class ModelManager:
         agent.model = loaded_model
         agent.epsilon = metadata.get('epsilon', agent.epsilon)
         
-        print(f"Model loaded from: {model_dir}")
+        # Removed print() - not thread-safe in PyQt6
         return agent, metadata
     
     def list_models(self):
@@ -162,7 +162,7 @@ class ModelManager:
         if model_dir.exists():
             import shutil
             shutil.rmtree(model_dir)
-            print(f"Model deleted: {name}")
+            # Removed print() - not thread-safe in PyQt6
             return True
         return False
     

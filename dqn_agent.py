@@ -21,13 +21,13 @@ class DQNAgent:
         self.action_size = action_size
         self.architecture_name = architecture_name
 
-        # Hyperparameters - optimized for Tower of Hanoi
-        self.gamma = 0.99  # Discount factor (higher for long-term planning)
-        self.epsilon = 1.0  # Exploration rate
+        # Hyperparameters - optimized for Tower of Hanoi with strong reward shaping
+        self.gamma = 0.90  # Lower discount to prioritize immediate rewards/penalties
+        self.epsilon = 0.5  # Start with 50% exploitation (was 1.0 - too much random exploration)
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
-        self.learning_rate = 0.0005  # Lower learning rate for stability
-        self.batch_size = 64
+        self.epsilon_decay = 0.995  # Decay to min over ~500 episodes
+        self.learning_rate = 0.001  # Higher learning rate for faster learning
+        self.batch_size = 64  # Larger batch for more stable learning (was 32)
 
         # Replay memory
         self.memory = deque(maxlen=10000)  # Larger memory for better learning
@@ -44,7 +44,7 @@ class DQNAgent:
         
         # Target network update frequency
         self.target_update_counter = 0
-        self.target_update_freq = 10  # Update target every 10 training steps
+        self.target_update_freq = 100  # Update target every 100 training steps (was 10)
 
     def _build_model(self):
         """Build neural network using the selected architecture."""
@@ -62,12 +62,32 @@ class DQNAgent:
         """Store experiences in memory."""
         self.memory.append((state, action, reward, next_state, done))
 
-    def act(self, state):
-        """Choose an action based on the epsilon-greedy policy."""
+    def act(self, state, valid_actions=None):
+        """
+        Choose an action based on the epsilon-greedy policy.
+        
+        Args:
+            state: Current state
+            valid_actions: Optional list of valid action indices. If provided, only these actions will be considered.
+        """
         if np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_size)  # Explore
-        q_values = self.model.predict(state, verbose=0)
-        return np.argmax(q_values[0])  # Exploit
+            # Explore: choose random action (only from valid actions if provided)
+            if valid_actions is not None and len(valid_actions) > 0:
+                return random.choice(valid_actions)
+            return random.randrange(self.action_size)
+        
+        # Exploit: choose best action
+        q_values = self.model.predict(state, verbose=0)[0]
+        
+        # If valid actions are provided, mask out invalid actions
+        if valid_actions is not None and len(valid_actions) > 0:
+            # Set Q-values of invalid actions to very negative number
+            masked_q_values = np.full(self.action_size, -np.inf)
+            for action in valid_actions:
+                masked_q_values[action] = q_values[action]
+            return np.argmax(masked_q_values)
+        
+        return np.argmax(q_values)
 
     def replay(self):
         """Train the model using experiences in replay memory with target network."""
