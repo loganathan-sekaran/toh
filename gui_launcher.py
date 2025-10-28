@@ -355,26 +355,30 @@ class MainLauncher(QMainWindow):
         
         layout.addWidget(container)
     
-    def show_visualization_page(self, visualizer_widget):
+    def show_visualization_page(self, visualizer_widget, show_test_again=False):
         """Switch to visualization page and embed the visualizer."""
-        # Clear reference to old visualizer before deleting
-        if hasattr(self, 'current_visualizer'):
-            self.current_visualizer = None
-        
         # Clear previous visualization
         old_layout = self.viz_container.layout()
         if old_layout:
             while old_layout.count():
                 item = old_layout.takeAt(0)
                 if item.widget():
-                    item.widget().deleteLater()
+                    widget = item.widget()
+                    if widget and widget != visualizer_widget:  # Don't delete the new visualizer
+                        widget.deleteLater()
+        
+        # Set the new visualizer as current BEFORE clearing reference
+        self.current_visualizer = visualizer_widget
         
         # Create new layout
         layout = QVBoxLayout(self.viz_container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # Add back to menu button at top
+        # Top button bar
+        button_bar = QHBoxLayout()
+        
+        # Add back to menu button
         back_btn = QPushButton("⬅️  Back to Menu")
         back_btn.setStyleSheet("""
             QPushButton {
@@ -390,7 +394,31 @@ class MainLauncher(QMainWindow):
             }
         """)
         back_btn.clicked.connect(self.show_menu_page)
-        layout.addWidget(back_btn)
+        button_bar.addWidget(back_btn)
+        
+        # Add Test Again button if in test mode
+        if show_test_again:
+            button_bar.addStretch()
+            test_again_btn = QPushButton("🔄 Test Again")
+            test_again_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #28a745;
+                    color: white;
+                    border: none;
+                    padding: 10px 20px;
+                    font-size: 14px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #218838;
+                }
+            """)
+            test_again_btn.clicked.connect(self.retest_model)
+            button_bar.addWidget(test_again_btn)
+        
+        button_bar_widget = QWidget()
+        button_bar_widget.setLayout(button_bar)
+        layout.addWidget(button_bar_widget)
         
         # Add visualizer widget
         layout.addWidget(visualizer_widget)
@@ -607,7 +635,12 @@ class MainLauncher(QMainWindow):
                         env = TowerOfHanoiEnv(num_discs=num_discs)
                         visualizer = TowerOfHanoiVisualizer(env, num_discs=num_discs, standalone=False)
                         
-                        self.show_visualization_page(visualizer)
+                        # Store test context for retesting
+                        self.test_env = env
+                        self.test_agent = agent
+                        self.test_num_discs = num_discs
+                        
+                        self.show_visualization_page(visualizer, show_test_again=True)
                         
                         # Run test episode
                         self.run_test_episode(env, agent, visualizer, num_discs)
@@ -805,6 +838,35 @@ class MainLauncher(QMainWindow):
         self.test_thread = thread
         
         thread.start()
+    
+    def retest_model(self):
+        """Re-run test with the same model."""
+        if not hasattr(self, 'test_env') or not hasattr(self, 'test_agent'):
+            QMessageBox.warning(self, "No Test Context", "No test context available. Please run a test first.")
+            return
+        
+        # Stop any running test (safely check if thread exists and is valid)
+        try:
+            if hasattr(self, 'test_thread') and self.test_thread:
+                if not sip.isdeleted(self.test_thread) and self.test_thread.isRunning():
+                    self.test_thread.quit()
+                    self.test_thread.wait(1000)
+        except RuntimeError:
+            # Thread already deleted, ignore
+            pass
+        
+        # Create new environment and visualizer
+        from toh import TowerOfHanoiEnv
+        from visualizer import TowerOfHanoiVisualizer
+        
+        env = TowerOfHanoiEnv(num_discs=self.test_num_discs)
+        visualizer = TowerOfHanoiVisualizer(env, num_discs=self.test_num_discs, standalone=False)
+        
+        # Update visualization page with new visualizer (this sets current_visualizer)
+        self.show_visualization_page(visualizer, show_test_again=True)
+        
+        # Run test episode
+        self.run_test_episode(env, self.test_agent, visualizer, self.test_num_discs)
     
     def on_quick_train(self):
         """Run quick training."""
