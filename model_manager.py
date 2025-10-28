@@ -8,6 +8,22 @@ import json
 from datetime import datetime
 from pathlib import Path
 import tensorflow as tf
+import numpy as np
+
+
+def convert_to_json_serializable(obj):
+    """Convert numpy types to native Python types for JSON serialization"""
+    if isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_to_json_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_json_serializable(item) for item in obj]
+    return obj
 
 
 class ModelManager:
@@ -58,6 +74,9 @@ class ModelManager:
         # Add custom metadata
         if metadata:
             model_metadata.update(metadata)
+        
+        # Convert all values to JSON-serializable types
+        model_metadata = convert_to_json_serializable(model_metadata)
         
         # Save metadata
         metadata_path = model_dir / self.metadata_file
