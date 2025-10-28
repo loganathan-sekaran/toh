@@ -46,9 +46,22 @@ class TrainingWorker(QObject):
         self.total_steps = 0
         episode_steps_list = []
         
+        # Send initial configuration to visualizer
+        self.update_info.emit({
+            'target_episodes': self.config['episodes'],
+            'episode': 0,
+            'step': 0,
+            'reward': 0,
+            'epsilon': self.agent.epsilon,
+            'success_rate': 0.0,
+            'avg_steps': 0.0
+        })
+        
         for episode in range(1, self.config['episodes'] + 1):
             if self.should_stop or self.visualizer.should_stop:
-                self.finished.emit("Training stopped by user")
+                # Save model before stopping
+                self._save_current_model(episode - 1, episode_steps_list)
+                self.finished.emit(f"Training stopped at episode {episode-1}. Model saved.")
                 return
             
             # Reset episode-specific agent state
@@ -115,21 +128,50 @@ class TrainingWorker(QObject):
             episode_steps_list.append(steps)
             self.total_steps += steps
             
-            # Calculate success rate
+            # Calculate metrics
             success_rate = (self.success_count / episode) * 100
+            avg_steps = self.total_steps / episode
             
-            # Emit progress signal
+            # Emit progress signal with comprehensive metrics
             self.progress.emit(episode, self.agent.epsilon, success_rate)
+            
+            # Send detailed update to visualizer
+            self.update_info.emit({
+                'episode': episode,
+                'success_rate': success_rate,
+                'avg_steps': avg_steps,
+                'episode_success': 1 if success else 0,
+                'epsilon': self.agent.epsilon,
+                'target_episodes': self.config['episodes']
+            })
+            
+            # Save checkpoint every 100 episodes (to prevent data loss)
+            if episode % 100 == 0 and episode < self.config['episodes']:
+                self._save_current_model(episode, episode_steps_list)
+                print(f"Checkpoint saved at episode {episode}")
             
             # Note: Agent training now happens after each step, not per episode
         
-        # Save model after training
+        # Save model after training completes normally
+        self._save_current_model(self.config['episodes'], episode_steps_list)
+        self.finished.emit(f"Training completed {self.config['episodes']} episodes! Model saved.")
+    
+    def _save_current_model(self, episodes_completed, episode_steps_list):
+        """Save the current model with metadata."""
+        from model_manager import ModelManager
+        
         model_manager = ModelManager()
-        avg_steps = self.total_steps / self.config['episodes']
-        success_rate = (self.success_count / self.config['episodes']) * 100
+        
+        # Calculate metrics
+        if episodes_completed > 0:
+            avg_steps = self.total_steps / episodes_completed
+            success_rate = (self.success_count / episodes_completed) * 100
+        else:
+            avg_steps = 0
+            success_rate = 0
         
         metadata = {
-            'episodes': self.config['episodes'],
+            'episodes': episodes_completed,
             'num_discs': self.config['num_discs'],
             'success_rate': success_rate,
             'avg_steps': avg_steps,
@@ -139,8 +181,6 @@ class TrainingWorker(QObject):
         
         model_dir = model_manager.save_model(self.agent, metadata=metadata)
         self.model_saved.emit(str(model_dir), metadata)
-        
-        self.finished.emit(f"Training completed {self.config['episodes']} episodes! Model saved.")
     
     def stop(self):
         """Stop the training."""
@@ -153,7 +193,7 @@ class MainLauncher(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Tower of Hanoi - RL Trainer")
-        self.setMinimumSize(800, 700)
+        self.setMinimumSize(1400, 900)  # Updated to match visualizer window size
         
         # Training worker and thread
         self.training_thread = None

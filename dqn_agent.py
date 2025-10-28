@@ -33,9 +33,11 @@ class DQNAgent:
         # Replay memory
         self.memory = deque(maxlen=10000)  # Larger memory for better learning
         
-        # Oscillation detection - track recent actions to provide feedback
+        # Oscillation detection - track recent actions and FORCE exploration to break loops
         self.recent_actions = deque(maxlen=20)  # Track last 20 actions
-        self.oscillation_threshold = 6  # If same pattern repeats in 6 actions, warn about oscillation
+        self.oscillation_threshold = 6  # If same pattern repeats in 6 actions, break it
+        self.force_random_actions = 0  # Counter: force N random actions when oscillation detected
+        self.oscillation_penalty_scale = 3.0  # Extra penalty scaling for oscillation experiences
 
         # Get the model architecture
         self.architecture = ModelFactory.get_architecture(architecture_name)
@@ -71,10 +73,15 @@ class DQNAgent:
         """
         Store experiences in memory.
         Applies penalty scaling to amplify negative rewards for faster learning.
+        Extra scaling for oscillation-related penalties.
         """
         # Scale penalties (negative rewards) to make them more impactful
         if reward < 0:
-            scaled_reward = reward * self.penalty_scale
+            # Check if this is a severe penalty (likely oscillation-related)
+            if reward < -10:
+                scaled_reward = reward * self.oscillation_penalty_scale
+            else:
+                scaled_reward = reward * self.penalty_scale
         else:
             scaled_reward = reward
         
@@ -83,7 +90,7 @@ class DQNAgent:
     def act(self, state, valid_actions=None):
         """
         Choose an action based on the epsilon-greedy policy.
-        Includes oscillation detection to provide feedback.
+        Includes oscillation detection with FORCED exploration to break loops.
         
         Args:
             state: Current state
@@ -92,14 +99,17 @@ class DQNAgent:
         Returns:
             action: The selected action index
         """
-        # Check for oscillation patterns and provide warning feedback
+        # Check for oscillation patterns and FORCE exploration when detected
+        oscillation_detected = False
+        
         if len(self.recent_actions) >= self.oscillation_threshold:
             last_actions = list(self.recent_actions)[-self.oscillation_threshold:]
             
             # Check for repetitive single action: A,A,A,A,A,A...
             if len(set(last_actions)) == 1:
                 oscillating_action = last_actions[0]
-                print(f"⚠️  REPETITIVE ACTION: action {oscillating_action} repeated {self.oscillation_threshold} times")
+                print(f"⚠️  REPETITIVE ACTION: action {oscillating_action} repeated {self.oscillation_threshold} times - FORCING EXPLORATION")
+                oscillation_detected = True
             
             # Check for alternating 2-action pattern: A,B,A,B,A,B...
             elif len(set(last_actions)) == 2:
@@ -108,15 +118,27 @@ class DQNAgent:
                     for i in range(len(last_actions)-1)
                 )
                 if is_alternating:
-                    print(f"⚠️  OSCILLATION: 2-action cycle detected")
+                    print(f"⚠️  OSCILLATION: 2-action cycle detected - FORCING EXPLORATION")
+                    oscillation_detected = True
             
             # Check for 3-action cycle: A,B,C,A,B,C...
             elif len(set(last_actions)) == 3 and len(last_actions) >= 6:
                 mid = len(last_actions) // 2
                 if last_actions[:mid] == last_actions[mid:mid*2]:
-                    print(f"⚠️  3-ACTION CYCLE: pattern repeating")
+                    print(f"⚠️  3-ACTION CYCLE: pattern repeating - FORCING EXPLORATION")
+                    oscillation_detected = True
         
-        if np.random.rand() <= self.epsilon:
+        # If oscillation detected, force random exploration for next 10 actions
+        if oscillation_detected:
+            self.force_random_actions = 10
+            # Also boost epsilon temporarily to encourage more exploration
+            self.epsilon = min(1.0, self.epsilon + 0.3)
+        
+        # Force random action if counter is active OR normal epsilon-greedy
+        if self.force_random_actions > 0 or np.random.rand() <= self.epsilon:
+            if self.force_random_actions > 0:
+                self.force_random_actions -= 1
+                
             # Explore: choose random action (only from valid actions if provided)
             if valid_actions is not None and len(valid_actions) > 0:
                 action = random.choice(valid_actions)

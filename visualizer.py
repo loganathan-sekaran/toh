@@ -5,7 +5,8 @@ Interactive GUI with animation and training controls
 
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                              QHBoxLayout, QPushButton, QLabel, QSlider, QFrame)
+                              QHBoxLayout, QPushButton, QLabel, QSlider, QFrame,
+                              QProgressBar, QGroupBox, QGridLayout)
 from PyQt6.QtCore import Qt, QTimer, QRectF, pyqtSignal, QObject, pyqtSlot
 from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QFont
 import numpy as np
@@ -197,29 +198,34 @@ class TowerOfHanoiVisualizer(QMainWindow):
         self.standalone = standalone  # Whether this is a standalone window or embedded
         
         self.setWindowTitle("Tower of Hanoi - RL Training")
-        self.setGeometry(100, 100, 1000, 700)
+        self.setGeometry(100, 100, 1400, 900)  # Increased width to 1400px
+        self.setMinimumSize(1400, 900)  # Set minimum size with wider width
         
         # Create central widget and layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(15, 5, 15, 5)  # Minimal margins
+        main_layout.setSpacing(5)  # Minimal spacing between sections
         
         # Title
         title_label = QLabel("Tower of Hanoi - Reinforcement Learning")
-        title_label.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+        title_label.setFont(QFont("Arial", 16, QFont.Weight.Bold))  # Slightly smaller
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setMaximumHeight(35)  # Reduced title height
         main_layout.addWidget(title_label)
         
-        # Canvas
+        # Canvas - set fixed height to prevent expansion
         self.canvas = TowerOfHanoiCanvas(num_discs)
+        self.canvas.setFixedHeight(260)  # Fixed height - won't expand
         main_layout.addWidget(self.canvas)
         
         # Info panel
         info_frame = QFrame()
         info_frame.setFrameStyle(QFrame.Shape.StyledPanel)
+        info_frame.setFixedHeight(45)  # Fixed height
         info_layout = QHBoxLayout(info_frame)
+        info_layout.setContentsMargins(5, 2, 5, 2)  # Minimal padding
         
         self.episode_label = QLabel("Episode: 0")
         self.step_label = QLabel("Step: 0")
@@ -229,15 +235,92 @@ class TowerOfHanoiVisualizer(QMainWindow):
         
         for label in [self.episode_label, self.step_label, self.reward_label, 
                      self.epsilon_label, self.success_label]:
-            label.setFont(QFont("Arial", 11))
+            label.setFont(QFont("Arial", 10))  # Slightly smaller
             info_layout.addWidget(label)
         
         main_layout.addWidget(info_frame)
         
-        # Speed control
+                # Progress tracking section
+        progress_group = QGroupBox("Training Progress")
+        progress_group.setFont(QFont("Arial", 11, QFont.Weight.Bold))  # Smaller font
+        progress_group.setFixedHeight(110)  # Fixed height
+        progress_layout = QVBoxLayout()
+        progress_layout.setSpacing(3)  # Minimal spacing
+        progress_layout.setContentsMargins(5, 5, 5, 5)  # Minimal padding
+        
+        # Episode progress bar
+        progress_bar_layout = QHBoxLayout()
+        progress_label = QLabel("Episode Progress:")
+        progress_label.setFont(QFont("Arial", 9))  # Smaller
+        progress_bar_layout.addWidget(progress_label)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%v / %m episodes (%p%)")
+        self.progress_bar.setMinimumHeight(20)  # Reduced
+        self.progress_bar.setMaximumHeight(20)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #ccc;
+                border-radius: 5px;
+                text-align: center;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                border-radius: 3px;
+            }
+        """)
+        progress_bar_layout.addWidget(self.progress_bar)
+        progress_layout.addLayout(progress_bar_layout)
+        
+        # Learning metrics grid
+        metrics_grid = QGridLayout()
+        metrics_grid.setSpacing(3)  # Minimal spacing
+        
+        # Labels for metrics
+        self.total_episodes_label = QLabel("Total Episodes: 0")
+        self.avg_steps_label = QLabel("Avg Steps: 0.0")
+        self.best_success_label = QLabel("Best Success Rate: 0%")
+        self.recent_success_label = QLabel("Recent Success (last 10): 0%")
+        
+        metric_labels = [self.total_episodes_label, self.avg_steps_label, 
+                        self.best_success_label, self.recent_success_label]
+        
+        for label in metric_labels:
+            label.setFont(QFont("Arial", 9))  # Smaller font
+            label.setStyleSheet("padding: 3px; background-color: #f0f0f0; border-radius: 3px;")
+            label.setMaximumHeight(26)  # Reduced label height
+        
+        metrics_grid.addWidget(self.total_episodes_label, 0, 0)
+        metrics_grid.addWidget(self.avg_steps_label, 0, 1)
+        metrics_grid.addWidget(self.best_success_label, 1, 0)
+        metrics_grid.addWidget(self.recent_success_label, 1, 1)
+        
+        progress_layout.addLayout(metrics_grid)
+        progress_group.setLayout(progress_layout)
+        main_layout.addWidget(progress_group)
+        
+        # Initialize tracking variables
+        self.total_episodes = 0
+        self.target_episodes = 100  # Will be updated from config
+        self.episode_steps_history = []
+        self.episode_success_history = []
+        self.best_success_rate = 0.0
+        
+        # Speed control - wrapped in a frame with fixed height to prevent stretching
+        speed_frame = QFrame()
+        speed_frame.setFixedHeight(50)  # Fixed height
+        speed_frame_layout = QVBoxLayout(speed_frame)
+        speed_frame_layout.setContentsMargins(0, 0, 0, 0)
+        
         speed_layout = QHBoxLayout()
         speed_label = QLabel("Animation Speed:")
-        speed_label.setFont(QFont("Arial", 11))
+        speed_label.setFont(QFont("Arial", 10))  # Smaller
+        speed_label.setMaximumWidth(120)
+        speed_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
         self.speed_slider.setMinimum(10)
         self.speed_slider.setMaximum(200)
@@ -245,32 +328,45 @@ class TowerOfHanoiVisualizer(QMainWindow):
         self.speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.speed_slider.setTickInterval(20)
         self.speed_slider.valueChanged.connect(self.on_speed_change)
+        self.speed_slider.setFixedHeight(35)  # Reduced from 40
         self.speed_value_label = QLabel("30 ms/frame")
-        self.speed_value_label.setFont(QFont("Arial", 11))
+        self.speed_value_label.setFont(QFont("Arial", 10))  # Smaller
+        self.speed_value_label.setMaximumWidth(90)
+        self.speed_value_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         
         speed_layout.addWidget(speed_label)
         speed_layout.addWidget(self.speed_slider)
         speed_layout.addWidget(self.speed_value_label)
-        main_layout.addLayout(speed_layout)
+        speed_frame_layout.addLayout(speed_layout)
+        
+        main_layout.addWidget(speed_frame)
         
         # Control buttons
         button_layout = QHBoxLayout()
         
         self.pause_button = QPushButton("Pause")
-        self.pause_button.setFont(QFont("Arial", 12))
+        self.pause_button.setFont(QFont("Arial", 11))  # Slightly smaller
+        self.pause_button.setMinimumHeight(35)  # Reduced from 40
+        self.pause_button.setMaximumHeight(35)
         self.pause_button.clicked.connect(self.toggle_pause)
         
         self.stop_button = QPushButton("Stop Training")
-        self.stop_button.setFont(QFont("Arial", 12))
+        self.stop_button.setFont(QFont("Arial", 11))  # Slightly smaller
+        self.stop_button.setMinimumHeight(35)
+        self.stop_button.setMaximumHeight(35)
         self.stop_button.clicked.connect(self.stop_training)
         
         self.test_button = QPushButton("Test Model")
-        self.test_button.setFont(QFont("Arial", 12))
+        self.test_button.setFont(QFont("Arial", 11))  # Slightly smaller
+        self.test_button.setMinimumHeight(35)
+        self.test_button.setMaximumHeight(35)
         self.test_button.clicked.connect(self.test_model)
         
         # Toggle visualization button
         self.viz_button = QPushButton("Hide Visualization (Fast Training)")
-        self.viz_button.setFont(QFont("Arial", 12))
+        self.viz_button.setFont(QFont("Arial", 11))  # Slightly smaller
+        self.viz_button.setMinimumHeight(35)
+        self.viz_button.setMaximumHeight(35)
         self.viz_button.setStyleSheet("background-color: #4CAF50; color: white;")
         self.viz_button.clicked.connect(self.toggle_visualization)
         self.show_visualization = True  # Start with visualization enabled
@@ -279,7 +375,11 @@ class TowerOfHanoiVisualizer(QMainWindow):
         button_layout.addWidget(self.stop_button)
         button_layout.addWidget(self.viz_button)
         button_layout.addWidget(self.test_button)
+        
         main_layout.addLayout(button_layout)
+        
+        # Add stretch AFTER buttons to push everything to the top
+        main_layout.addStretch()
         
         # Animation frames for smooth movement
         self.animation_frames = 30  # Frames per animation (30 frames @ 20ms = 600ms per move)
@@ -378,17 +478,54 @@ class TowerOfHanoiVisualizer(QMainWindow):
     @pyqtSlot(dict)
     def update_info(self, data):
         """Update the information display (thread-safe slot)"""
-        # Update metrics labels (always update these for monitoring)
+        # Update basic metrics labels (always update these for monitoring)
         if 'episode' in data and data['episode'] is not None:
-            self.episode_label.setText(f"Episode: {data['episode']}")
+            episode = data['episode']
+            self.episode_label.setText(f"Episode: {episode}")
+            self.total_episodes = episode
+            
+            # Update progress bar
+            self.progress_bar.setMaximum(self.target_episodes)
+            self.progress_bar.setValue(episode)
+            
+            # Update total episodes label
+            self.total_episodes_label.setText(f"Total Episodes: {episode}")
+            
         if 'step' in data and data['step'] is not None:
             self.step_label.setText(f"Step: {data['step']}")
+            
         if 'reward' in data and data['reward'] is not None:
             self.reward_label.setText(f"Reward: {data['reward']:.2f}")
+            
         if 'epsilon' in data and data['epsilon'] is not None:
             self.epsilon_label.setText(f"Epsilon: {data['epsilon']:.3f}")
+            
         if 'success_rate' in data and data['success_rate'] is not None:
-            self.success_label.setText(f"Success Rate: {data['success_rate']:.1f}%")
+            success_rate = data['success_rate']
+            self.success_label.setText(f"Success Rate: {success_rate:.1f}%")
+            
+            # Update best success rate
+            if success_rate > self.best_success_rate:
+                self.best_success_rate = success_rate
+            self.best_success_label.setText(f"Best Success Rate: {self.best_success_rate:.1f}%")
+        
+        # Track episode completion for average steps
+        if 'avg_steps' in data and data['avg_steps'] is not None:
+            self.avg_steps_label.setText(f"Avg Steps: {data['avg_steps']:.1f}")
+        
+        # Track recent success for last 10 episodes
+        if 'episode_success' in data and data['episode_success'] is not None:
+            self.episode_success_history.append(data['episode_success'])
+            if len(self.episode_success_history) > 10:
+                self.episode_success_history.pop(0)
+            
+            recent_success = sum(self.episode_success_history) / len(self.episode_success_history) * 100
+            self.recent_success_label.setText(f"Recent Success (last {len(self.episode_success_history)}): {recent_success:.1f}%")
+        
+        # Update target episodes if provided
+        if 'target_episodes' in data and data['target_episodes'] is not None:
+            self.target_episodes = data['target_episodes']
+            self.progress_bar.setMaximum(self.target_episodes)
     
     def wait_if_paused(self):
         """Block execution while paused"""
