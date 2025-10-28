@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QMetaObject
 from PyQt6.QtGui import QFont, QPalette, QColor
+from PyQt6 import sip
 
 
 class TrainingWorker(QObject):
@@ -356,6 +357,10 @@ class MainLauncher(QMainWindow):
     
     def show_visualization_page(self, visualizer_widget):
         """Switch to visualization page and embed the visualizer."""
+        # Clear reference to old visualizer before deleting
+        if hasattr(self, 'current_visualizer'):
+            self.current_visualizer = None
+        
         # Clear previous visualization
         old_layout = self.viz_container.layout()
         if old_layout:
@@ -531,9 +536,15 @@ class MainLauncher(QMainWindow):
     
     def on_training_progress(self, episode, epsilon, success_rate):
         """Handle training progress updates (runs on main thread)."""
-        if hasattr(self, 'current_visualizer'):
-            self.current_visualizer.update_info({'episode': episode, 'epsilon': epsilon, 'success_rate': success_rate})
-            QApplication.processEvents()
+        if hasattr(self, 'current_visualizer') and self.current_visualizer is not None:
+            try:
+                # Check if the visualizer widget still exists
+                if not sip.isdeleted(self.current_visualizer):
+                    self.current_visualizer.update_info({'episode': episode, 'epsilon': epsilon, 'success_rate': success_rate})
+                    QApplication.processEvents()
+            except RuntimeError:
+                # Widget was deleted, clear reference
+                self.current_visualizer = None
     
     def on_training_finished(self, message):
         """Handle training completion (runs on main thread)."""
@@ -559,35 +570,56 @@ class MainLauncher(QMainWindow):
         from model_selection_dialog import ModelSelectionDialog
         from model_manager import ModelManager
         
-        dialog = ModelSelectionDialog(self, auto_select_latest=True)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            model_name, metadata = dialog.get_selected_model()
-            if model_name:
+        try:
+            dialog = ModelSelectionDialog(self, auto_select_latest=True)
+            result = dialog.exec()
+            
+            if result == QDialog.DialogCode.Accepted:
+                model_name, metadata = dialog.get_selected_model()
+                if not model_name:
+                    QMessageBox.warning(self, "No Selection", "Please select a model to test.")
+                    return
+                
                 # Load the model
                 model_manager = ModelManager()
                 try:
                     agent, metadata = model_manager.load_model(model_name)
                     
-                    # Show model architecture
+                    # Show model architecture first
                     self.show_model_architecture(agent.model, metadata)
                     
-                    # Run test with visualization
-                    from toh import TowerOfHanoiEnv
-                    from visualizer import TowerOfHanoiVisualizer
-                    from util import flatten_state
-                    import numpy as np
+                    # Ask if user wants to run test
+                    reply = QMessageBox.question(
+                        self,
+                        "Run Test",
+                        "Would you like to run a test episode with this model?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
                     
-                    num_discs = metadata.get('num_discs', 3)
-                    env = TowerOfHanoiEnv(num_discs=num_discs)
-                    visualizer = TowerOfHanoiVisualizer(env, num_discs=num_discs, standalone=False)
-                    
-                    self.show_visualization_page(visualizer)
-                    
-                    # Run test episode
-                    self.run_test_episode(env, agent, visualizer, num_discs)
-                    
+                    if reply == QMessageBox.StandardButton.Yes:
+                        # Run test with visualization
+                        from toh import TowerOfHanoiEnv
+                        from visualizer import TowerOfHanoiVisualizer
+                        from util import flatten_state
+                        import numpy as np
+                        
+                        num_discs = metadata.get('num_discs', 3)
+                        env = TowerOfHanoiEnv(num_discs=num_discs)
+                        visualizer = TowerOfHanoiVisualizer(env, num_discs=num_discs, standalone=False)
+                        
+                        self.show_visualization_page(visualizer)
+                        
+                        # Run test episode
+                        self.run_test_episode(env, agent, visualizer, num_discs)
+                        
                 except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Failed to load model:\n{str(e)}")
+                    import traceback
+                    error_msg = f"Failed to load model:\n{str(e)}\n\n{traceback.format_exc()}"
+                    QMessageBox.critical(self, "Error", error_msg)
+        except Exception as e:
+            import traceback
+            error_msg = f"Error in test dialog:\n{str(e)}\n\n{traceback.format_exc()}"
+            QMessageBox.critical(self, "Error", error_msg)
     
     def show_model_architecture(self, model, metadata):
         """Show model architecture in a dialog"""
@@ -650,44 +682,105 @@ class MainLauncher(QMainWindow):
                 done = False
                 steps = 0
                 total_reward = 0
+                invalid_move_count = 0
+                last_actions = []
+                
+                print("\n=== TEST EPISODE STARTED ===")
+                print(f"Initial state: {self.env.state}")
                 
                 while not done and steps < 100:
                     flat_state = flatten_state(state, self.num_discs)
                     flat_state = np.reshape(flat_state, [1, self.agent.state_size])
                     
-                    # Use agent to select action (no exploration)
+                    # Get Q-values for all actions
                     q_values = self.agent.model.predict(flat_state, verbose=0)
-                    action = np.argmax(q_values[0])
                     
-                    # Get move details
+                    # Mask invalid actions by setting their Q-values to -inf
+                    valid_actions = self.env.get_valid_actions()
+                    masked_q_values = q_values[0].copy()
+                    for action in range(len(masked_q_values)):
+                        if action not in valid_actions:
+                            masked_q_values[action] = -np.inf
+                    
+                    # Select best valid action
+                    action = np.argmax(masked_q_values)
+                    
+                    # Track repeating actions
+                    last_actions.append(action)
+                    if len(last_actions) > 10:
+                        last_actions.pop(0)
+                    
+                    # Get move details BEFORE executing
                     from_rod, to_rod = self.env.decode_action(action)
                     disc = self.env.state[from_rod][-1] if self.env.state[from_rod] else None
+                    
+                    print(f"\nStep {steps + 1}:")
+                    print(f"  State: {self.env.state}")
+                    print(f"  Valid actions: {valid_actions}")
+                    print(f"  Action: {action} ({from_rod}→{to_rod})")
+                    print(f"  Q-values (raw): {q_values[0]}")
+                    print(f"  Q-values (masked): {masked_q_values}")
+                    print(f"  Top disc on rod {from_rod}: {disc}")
                     
                     # Execute action
                     next_state, reward, done, _ = self.env.step(action)
                     total_reward += reward
                     steps += 1
                     
-                    # Visualize
+                    print(f"  Reward: {reward}, Total: {total_reward}")
+                    print(f"  Valid move: {disc is not None}")
+                    
+                    # Track invalid moves
+                    if reward < 0:
+                        invalid_move_count += 1
+                        print(f"  ⚠️ INVALID MOVE! Count: {invalid_move_count}")
+                        
+                        # Check for stuck pattern
+                        if invalid_move_count > 5:
+                            print(f"  ⚠️ TOO MANY INVALID MOVES!")
+                            print(f"  Last 10 actions: {last_actions}")
+                            # Break if truly stuck
+                            if len(set(last_actions[-5:])) <= 2:
+                                print("  ⚠️ STUCK IN LOOP - STOPPING TEST")
+                                self.show_message.emit("Test Stopped", 
+                                                      f"Agent stuck after {steps} steps with {invalid_move_count} invalid moves.",
+                                                      False)
+                                break
+                    else:
+                        invalid_move_count = 0  # Reset on valid move
+                    
+                    # Visualize (even invalid moves to show what's happening)
                     if disc:
                         self.animate_move_signal.emit(from_rod, to_rod, disc)
+                        time.sleep(0.5)
+                    else:
+                        # Show attempted invalid move
                         time.sleep(0.3)
-                        self.update_state_signal.emit([list(rod) for rod in self.env.state])
-                        self.update_info_signal.emit({'episode': 1, 'step': steps, 'reward': total_reward})
+                    
+                    self.update_state_signal.emit([list(rod) for rod in self.env.state])
+                    self.update_info_signal.emit({'episode': 1, 'step': steps, 'reward': total_reward})
                     
                     state = next_state
                     
                     if done:
                         success = (len(self.env.state[2]) == self.num_discs)
+                        print(f"\n=== EPISODE FINISHED ===")
+                        print(f"Success: {success}, Steps: {steps}, Total Reward: {total_reward}")
                         if success:
                             self.show_message.emit("Success!", 
-                                                  f"Model solved the puzzle in {steps} steps!",
+                                                  f"Model solved the puzzle in {steps} steps!\nTotal Reward: {total_reward}",
                                                   True)
                         else:
                             self.show_message.emit("Failed", 
                                                   f"Model failed to solve the puzzle in {steps} steps.",
                                                   False)
                         break
+                
+                if not done and steps >= 100:
+                    print(f"\n=== TIMEOUT - {steps} STEPS ===")
+                    self.show_message.emit("Timeout", 
+                                          f"Model did not solve puzzle in {steps} steps.",
+                                          False)
                 
                 self.finished.emit()
         

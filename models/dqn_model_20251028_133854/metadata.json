@@ -1,0 +1,16 @@
+{
+  "name": "dqn_model_20251028_133854",
+  "created_at": "2025-10-28T13:38:54.213881",
+  "state_size": 9,
+  "action_size": 6,
+  "architecture": "Medium (64-32)",
+  "epsilon": 0.5026417474081922,
+  "gamma": 0.9,
+  "learning_rate": 0.003,
+  "episodes": 700,
+  "num_discs": 3,
+  "success_rate": 100.0,
+  "avg_steps": 72.50571428571429,
+  "final_epsilon": 0.5026417474081922,
+  "total_steps": 50754
+}

@@ -152,9 +152,14 @@ class ModelManager:
             if model_dir.is_dir():
                 metadata_path = model_dir / self.metadata_file
                 if metadata_path.exists():
-                    with open(metadata_path, 'r') as f:
-                        metadata = json.load(f)
-                    models.append((model_dir.name, metadata))
+                    try:
+                        with open(metadata_path, 'r') as f:
+                            metadata = json.load(f)
+                        models.append((model_dir.name, metadata))
+                    except (json.JSONDecodeError, ValueError) as e:
+                        # Skip corrupted metadata files
+                        print(f"Warning: Skipping corrupted metadata for {model_dir.name}: {e}")
+                        continue
                 else:
                     # Model without metadata
                     models.append((model_dir.name, {"name": model_dir.name}))
