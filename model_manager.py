@@ -201,3 +201,72 @@ class ModelManager:
             with open(metadata_path, 'r') as f:
                 return json.load(f)
         return {"name": name}
+    
+    def update_metadata(self, name, updates):
+        """
+        Update model metadata
+        
+        Args:
+            name: Model name
+            updates: Dictionary of metadata fields to update
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        model_dir = self.models_dir / name
+        if not model_dir.exists():
+            return False
+        
+        metadata_path = model_dir / self.metadata_file
+        
+        # Load existing metadata
+        if metadata_path.exists():
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+        else:
+            metadata = {"name": name}
+        
+        # Update with new values
+        serialized_updates = convert_to_json_serializable(updates)
+        if isinstance(serialized_updates, dict):
+            metadata.update(serialized_updates)
+        
+        # Save updated metadata
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        return True
+    
+    def rename_model(self, old_name, new_name):
+        """
+        Rename a model
+        
+        Args:
+            old_name: Current model name
+            new_name: New model name
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        old_dir = self.models_dir / old_name
+        new_dir = self.models_dir / new_name
+        
+        if not old_dir.exists():
+            return False
+        
+        if new_dir.exists():
+            return False  # New name already exists
+        
+        # Rename directory
+        old_dir.rename(new_dir)
+        
+        # Update name in metadata
+        metadata_path = new_dir / self.metadata_file
+        if metadata_path.exists():
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+            metadata['name'] = new_name
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+        
+        return True

@@ -16,6 +16,13 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QMetaObject
 from PyQt6.QtGui import QFont, QPalette, QColor
 from PyQt6 import sip
 
+# Matplotlib for performance graphs
+import matplotlib
+matplotlib.use('QtAgg')  # Use Qt backend
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+
 
 class TrainingWorker(QObject):
     """Worker object for running training in a separate thread."""
@@ -25,6 +32,7 @@ class TrainingWorker(QObject):
     update_info = pyqtSignal(dict)  # GUI update data (episode, step, reward, epsilon)
     update_state = pyqtSignal(object)  # Environment state update
     animate_move = pyqtSignal(int, int, int)  # from_rod, to_rod, disc
+    performance_data = pyqtSignal(int, float, float)  # episode, steps, moving_avg_steps
     
     def __init__(self, env, agent, visualizer, config):
         super().__init__()
@@ -35,6 +43,12 @@ class TrainingWorker(QObject):
         self.should_stop = False
         self.success_count = 0
         self.total_steps = 0
+        
+        # Early stopping parameters
+        self.patience = config.get('patience', 50)  # Stop if no improvement for N episodes
+        self.min_improvement = 0.05  # Minimum 5% improvement required
+        self.best_avg_steps = float('inf')
+        self.episodes_without_improvement = 0
     
     def run(self):
         """Run the training loop."""
@@ -133,6 +147,34 @@ class TrainingWorker(QObject):
             success_rate = (self.success_count / episode) * 100
             avg_steps = self.total_steps / episode
             
+            # Calculate moving average for last 20 episodes for early stopping
+            window_size = min(20, episode)
+            recent_steps = episode_steps_list[-window_size:]
+            moving_avg_steps = sum(recent_steps) / len(recent_steps)
+            
+            # Emit performance data for graphing
+            self.performance_data.emit(episode, steps, moving_avg_steps)
+            
+            # Early stopping check (after initial exploration period)
+            if episode >= 100:  # Allow initial learning phase
+                # Check if performance is improving
+                if moving_avg_steps < self.best_avg_steps * (1 - self.min_improvement):
+                    # Significant improvement!
+                    self.best_avg_steps = moving_avg_steps
+                    self.episodes_without_improvement = 0
+                    print(f"Episode {episode}: New best avg steps: {moving_avg_steps:.1f}")
+                else:
+                    self.episodes_without_improvement += 1
+                    
+                    # Check if we should stop
+                    if self.episodes_without_improvement >= self.patience:
+                        print(f"\nEarly stopping triggered at episode {episode}")
+                        print(f"No improvement for {self.patience} episodes")
+                        print(f"Best moving average: {self.best_avg_steps:.1f} steps")
+                        self._save_current_model(episode, episode_steps_list)
+                        self.finished.emit(f"Training stopped early at episode {episode} (no improvement). Model saved.")
+                        return
+            
             # Emit progress signal with comprehensive metrics
             self.progress.emit(episode, self.agent.epsilon, success_rate)
             
@@ -186,6 +228,96 @@ class TrainingWorker(QObject):
     def stop(self):
         """Stop the training."""
         self.should_stop = True
+
+
+class PerformanceGraphWidget(QWidget):
+    """Widget to display real-time performance graph during training."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.episodes = []
+        self.steps_data = []
+        self.moving_avg_data = []
+        self.optimal_steps = 7  # For 3 discs, will be updated dynamically
+        
+        # Create matplotlib figure and canvas
+        self.figure = Figure(figsize=(8, 4), dpi=100)
+        self.canvas = FigureCanvas(self.figure)
+        self.ax = self.figure.add_subplot(111)
+        
+        # Setup layout
+        layout = QVBoxLayout()
+        layout.addWidget(self.canvas)
+        self.setLayout(layout)
+        
+        # Initialize plot
+        self.init_plot()
+    
+    def init_plot(self):
+        """Initialize the plot with labels and styling."""
+        self.ax.clear()
+        self.ax.set_xlabel('Episode', fontsize=10)
+        self.ax.set_ylabel('Steps', fontsize=10)
+        self.ax.set_title('Training Performance: Steps per Episode', fontsize=12, fontweight='bold')
+        self.ax.grid(True, alpha=0.3)
+        self.ax.set_facecolor('#f0f0f0')
+        self.figure.tight_layout()
+        self.canvas.draw()
+    
+    def set_optimal_steps(self, num_discs):
+        """Set the optimal steps line based on number of discs."""
+        self.optimal_steps = (2 ** num_discs) - 1
+    
+    def update_plot(self, episode, steps, moving_avg):
+        """Update the plot with new data point."""
+        self.episodes.append(episode)
+        self.steps_data.append(steps)
+        self.moving_avg_data.append(moving_avg)
+        
+        # Keep only last 500 episodes for performance
+        if len(self.episodes) > 500:
+            self.episodes = self.episodes[-500:]
+            self.steps_data = self.steps_data[-500:]
+            self.moving_avg_data = self.moving_avg_data[-500:]
+        
+        # Redraw plot
+        self.ax.clear()
+        
+        # Plot steps per episode (light blue, semi-transparent)
+        self.ax.plot(self.episodes, self.steps_data, 'o-', color='lightblue', 
+                     linewidth=1, markersize=2, alpha=0.5, label='Steps per episode')
+        
+        # Plot moving average (thick blue line)
+        self.ax.plot(self.episodes, self.moving_avg_data, '-', color='#2196F3', 
+                     linewidth=2.5, label='Moving average (20 episodes)')
+        
+        # Plot optimal steps line (green dashed)
+        if len(self.episodes) > 0:
+            self.ax.axhline(y=self.optimal_steps, color='green', linestyle='--', 
+                           linewidth=2, label=f'Optimal ({self.optimal_steps} steps)')
+        
+        # Styling
+        self.ax.set_xlabel('Episode', fontsize=10)
+        self.ax.set_ylabel('Steps', fontsize=10)
+        self.ax.set_title('Training Performance: Steps per Episode', fontsize=12, fontweight='bold')
+        self.ax.legend(loc='upper right', fontsize=9)
+        self.ax.grid(True, alpha=0.3)
+        self.ax.set_facecolor('#f0f0f0')
+        
+        # Set y-axis limits for better visualization
+        if len(self.steps_data) > 0:
+            max_steps = max(self.steps_data[-min(100, len(self.steps_data)):])
+            self.ax.set_ylim(0, max(max_steps * 1.1, self.optimal_steps * 2))
+        
+        self.figure.tight_layout()
+        self.canvas.draw()
+    
+    def clear_plot(self):
+        """Clear all data and reset the plot."""
+        self.episodes = []
+        self.steps_data = []
+        self.moving_avg_data = []
+        self.init_plot()
 
 
 class MainLauncher(QMainWindow):
@@ -280,7 +412,11 @@ class MainLauncher(QMainWindow):
                                "Fast training (500 episodes, no visualization)",
                                self.on_quick_train)
         
-        self.create_menu_button(buttons_layout, "📊  Compare Models", 
+        self.create_menu_button(buttons_layout, "�  Continue Training", 
+                               "Load existing model and continue training (transfer learning)",
+                               self.on_continue_training)
+        
+        self.create_menu_button(buttons_layout, "�📊  Compare Models", 
                                "Compare performance of multiple models",
                                self.on_compare_models)
         
@@ -355,7 +491,7 @@ class MainLauncher(QMainWindow):
         
         layout.addWidget(container)
     
-    def show_visualization_page(self, visualizer_widget, show_test_again=False):
+    def show_visualization_page(self, visualizer_widget, show_test_again=False, performance_graph=None):
         """Switch to visualization page and embed the visualizer."""
         # Clear previous visualization
         old_layout = self.viz_container.layout()
@@ -364,7 +500,7 @@ class MainLauncher(QMainWindow):
                 item = old_layout.takeAt(0)
                 if item.widget():
                     widget = item.widget()
-                    if widget and widget != visualizer_widget:  # Don't delete the new visualizer
+                    if widget and widget != visualizer_widget and widget != performance_graph:  # Don't delete new widgets
                         widget.deleteLater()
         
         # Set the new visualizer as current BEFORE clearing reference
@@ -420,8 +556,18 @@ class MainLauncher(QMainWindow):
         button_bar_widget.setLayout(button_bar)
         layout.addWidget(button_bar_widget)
         
-        # Add visualizer widget
-        layout.addWidget(visualizer_widget)
+        # If performance graph is provided, add it at the bottom (for training mode)
+        if performance_graph:
+            # Create vertical layout: visualizer on top, graph on bottom
+            content_layout = QVBoxLayout()
+            content_layout.addWidget(visualizer_widget, stretch=2)  # Visualizer takes more space
+            content_layout.addWidget(performance_graph, stretch=1)  # Graph at bottom
+            content_widget = QWidget()
+            content_widget.setLayout(content_layout)
+            layout.addWidget(content_widget)
+        else:
+            # Just add visualizer (for test mode)
+            layout.addWidget(visualizer_widget)
         
         # Switch to visualization page
         self.stacked_widget.setCurrentWidget(self.viz_container)
@@ -534,9 +680,15 @@ class MainLauncher(QMainWindow):
             # Create agent with selected architecture
             agent = DQNAgent(state_size, action_size, architecture_name=config['architecture'])
             
-            # Create visualizer and show it
+            # Create visualizer
             visualizer = TowerOfHanoiVisualizer(env, num_discs=config['num_discs'], standalone=False)
-            self.show_visualization_page(visualizer)
+            
+            # Create performance graph
+            self.performance_graph = PerformanceGraphWidget()
+            self.performance_graph.set_optimal_steps(config['num_discs'])
+            
+            # Show visualization page with graph
+            self.show_visualization_page(visualizer, performance_graph=self.performance_graph)
             
             # Store agent for later access
             self.current_agent = agent
@@ -554,6 +706,7 @@ class MainLauncher(QMainWindow):
             self.training_worker.update_info.connect(visualizer.update_info)
             self.training_worker.update_state.connect(visualizer.update_state)
             self.training_worker.animate_move.connect(visualizer.animate_move)
+            self.training_worker.performance_data.connect(self.on_performance_update)
             self.training_worker.finished.connect(self.training_thread.quit)
             
             # Store references for updates
@@ -573,6 +726,17 @@ class MainLauncher(QMainWindow):
             except RuntimeError:
                 # Widget was deleted, clear reference
                 self.current_visualizer = None
+    
+    def on_performance_update(self, episode, steps, moving_avg):
+        """Handle performance data updates for the graph."""
+        if hasattr(self, 'performance_graph') and self.performance_graph is not None:
+            try:
+                if not sip.isdeleted(self.performance_graph):
+                    self.performance_graph.update_plot(episode, steps, moving_avg)
+                    QApplication.processEvents()
+            except RuntimeError:
+                # Widget was deleted, clear reference
+                self.performance_graph = None
     
     def on_training_finished(self, message):
         """Handle training completion (runs on main thread)."""
@@ -616,34 +780,49 @@ class MainLauncher(QMainWindow):
                     # Show model architecture first
                     self.show_model_architecture(agent.model, metadata)
                     
-                    # Ask if user wants to run test
-                    reply = QMessageBox.question(
-                        self,
-                        "Run Test",
-                        "Would you like to run a test episode with this model?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                    )
+                    # Show test configuration dialog
+                    test_config = self.show_test_config_dialog(metadata.get('num_discs', 3), agent.state_size)
+                    if not test_config:
+                        return  # User cancelled
                     
-                    if reply == QMessageBox.StandardButton.Yes:
-                        # Run test with visualization
-                        from toh import TowerOfHanoiEnv
-                        from visualizer import TowerOfHanoiVisualizer
-                        from util import flatten_state
-                        import numpy as np
-                        
-                        num_discs = metadata.get('num_discs', 3)
-                        env = TowerOfHanoiEnv(num_discs=num_discs)
-                        visualizer = TowerOfHanoiVisualizer(env, num_discs=num_discs, standalone=False)
-                        
-                        # Store test context for retesting
-                        self.test_env = env
-                        self.test_agent = agent
-                        self.test_num_discs = num_discs
-                        
-                        self.show_visualization_page(visualizer, show_test_again=True)
-                        
-                        # Run test episode
-                        self.run_test_episode(env, agent, visualizer, num_discs)
+                    num_discs = test_config['num_discs']
+                    show_visualization = test_config['show_visualization']
+                    
+                    # Validate state size compatibility
+                    expected_state_size = num_discs * 3  # 3 rods
+                    if expected_state_size != agent.state_size:
+                        reply = QMessageBox.warning(
+                            self,
+                            "State Size Mismatch",
+                            f"⚠️ Warning: This model was trained with {agent.state_size // 3} discs (state size: {agent.state_size}).\n\n"
+                            f"Testing with {num_discs} discs requires state size: {expected_state_size}.\n\n"
+                            f"The model may not work correctly with a different number of discs.\n\n"
+                            f"Would you like to continue anyway?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                        )
+                        if reply == QMessageBox.StandardButton.No:
+                            return
+                    
+                    # Run test with visualization
+                    from toh import TowerOfHanoiEnv
+                    from visualizer import TowerOfHanoiVisualizer
+                    from util import flatten_state
+                    import numpy as np
+                    
+                    env = TowerOfHanoiEnv(num_discs=num_discs)
+                    visualizer = TowerOfHanoiVisualizer(env, num_discs=num_discs, standalone=False)
+                    
+                    # Store test context for retesting
+                    self.test_env = env
+                    self.test_agent = agent
+                    self.test_num_discs = num_discs
+                    self.test_show_visualization = show_visualization
+                    self.test_trained_num_discs = agent.state_size // 3  # Store original training disc count
+                    
+                    self.show_visualization_page(visualizer, show_test_again=True)
+                    
+                    # Run test episode
+                    self.run_test_episode(env, agent, visualizer, num_discs, show_visualization)
                         
                 except Exception as e:
                     import traceback
@@ -653,6 +832,69 @@ class MainLauncher(QMainWindow):
             import traceback
             error_msg = f"Error in test dialog:\n{str(e)}\n\n{traceback.format_exc()}"
             QMessageBox.critical(self, "Error", error_msg)
+    
+    def show_test_config_dialog(self, default_num_discs, model_state_size):
+        """Show dialog to configure test parameters."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Test Configuration")
+        dialog.setMinimumSize(450, 300)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Title
+        title = QLabel("Configure Test Parameters")
+        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        
+        # Model info
+        trained_discs = model_state_size // 3
+        info = QLabel(f"Model trained with: {trained_discs} discs")
+        info.setStyleSheet("color: #666; font-style: italic; padding: 5px;")
+        info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(info)
+        
+        # Form layout
+        form = QFormLayout()
+        
+        # Number of discs
+        discs_spin = QSpinBox()
+        discs_spin.setMinimum(3)
+        discs_spin.setMaximum(10)
+        discs_spin.setValue(default_num_discs)
+        discs_spin.setToolTip("Select number of discs for testing (3-10)")
+        form.addRow("Number of Discs:", discs_spin)
+        
+        # Visualization toggle
+        viz_check = QCheckBox("Show Visualization")
+        viz_check.setChecked(True)
+        viz_check.setToolTip("Uncheck for faster testing without animation")
+        form.addRow("Visualization:", viz_check)
+        
+        layout.addLayout(form)
+        
+        # Warning for higher disc counts
+        warning = QLabel("⚠️ Note: Higher disc counts may take longer to solve")
+        warning.setStyleSheet("color: #856404; background-color: #fff3cd; padding: 10px; border-radius: 5px;")
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+        
+        layout.addStretch()
+        
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return {
+                'num_discs': discs_spin.value(),
+                'show_visualization': viz_check.isChecked()
+            }
+        return None
     
     def show_model_architecture(self, model, metadata):
         """Show model architecture in a dialog"""
@@ -687,8 +929,8 @@ class MainLauncher(QMainWindow):
         
         dialog.exec()
     
-    def run_test_episode(self, env, agent, visualizer, num_discs):
-        """Run a single test episode with visualization"""
+    def run_test_episode(self, env, agent, visualizer, num_discs, show_visualization=True):
+        """Run a single test episode with optional visualization"""
         from util import flatten_state
         import numpy as np
         
@@ -699,10 +941,12 @@ class MainLauncher(QMainWindow):
             show_message = pyqtSignal(str, str, bool)  # title, message, success
             finished = pyqtSignal()
             
-            def __init__(self, env, agent, num_discs):
+            def __init__(self, env, agent, num_discs, show_visualization):
                 super().__init__()
                 self.env = env
                 self.agent = agent
+                self.num_discs = num_discs
+                self.show_visualization = show_visualization
                 self.num_discs = num_discs
             
             def run(self):
@@ -720,9 +964,21 @@ class MainLauncher(QMainWindow):
                 
                 print("\n=== TEST EPISODE STARTED ===")
                 print(f"Initial state: {self.env.state}")
+                print(f"Agent state_size: {self.agent.state_size}, Test num_discs: {self.num_discs}")
                 
                 while not done and steps < 100:
                     flat_state = flatten_state(state, self.num_discs)
+                    
+                    # Handle state size mismatch by padding or truncating
+                    if len(flat_state) < self.agent.state_size:
+                        # Pad with zeros if state is smaller
+                        flat_state = np.pad(flat_state, (0, self.agent.state_size - len(flat_state)), 'constant')
+                        print(f"  Padded state from {len(flatten_state(state, self.num_discs))} to {self.agent.state_size}")
+                    elif len(flat_state) > self.agent.state_size:
+                        # Truncate if state is larger (not recommended)
+                        flat_state = flat_state[:self.agent.state_size]
+                        print(f"  ⚠️ Truncated state from {len(flatten_state(state, self.num_discs))} to {self.agent.state_size}")
+                    
                     flat_state = np.reshape(flat_state, [1, self.agent.state_size])
                     
                     # Get Q-values for all actions
@@ -782,16 +1038,22 @@ class MainLauncher(QMainWindow):
                     else:
                         invalid_move_count = 0  # Reset on valid move
                     
-                    # Visualize (even invalid moves to show what's happening)
-                    if disc:
-                        self.animate_move_signal.emit(from_rod, to_rod, disc)
-                        time.sleep(0.5)
+                    # Visualize only if enabled
+                    if self.show_visualization:
+                        # Visualize (even invalid moves to show what's happening)
+                        if disc:
+                            self.animate_move_signal.emit(from_rod, to_rod, disc)
+                            time.sleep(0.5)
+                        else:
+                            # Show attempted invalid move
+                            time.sleep(0.3)
+                        
+                        self.update_state_signal.emit([list(rod) for rod in self.env.state])
+                        self.update_info_signal.emit({'episode': 1, 'step': steps, 'reward': total_reward})
                     else:
-                        # Show attempted invalid move
-                        time.sleep(0.3)
-                    
-                    self.update_state_signal.emit([list(rod) for rod in self.env.state])
-                    self.update_info_signal.emit({'episode': 1, 'step': steps, 'reward': total_reward})
+                        # Fast mode - just update info periodically
+                        if steps % 10 == 0 or done:
+                            self.update_info_signal.emit({'episode': 1, 'step': steps, 'reward': total_reward})
                     
                     state = next_state
                     
@@ -817,7 +1079,7 @@ class MainLauncher(QMainWindow):
                 
                 self.finished.emit()
         
-        worker = TestWorker(env, agent, num_discs)
+        worker = TestWorker(env, agent, num_discs, show_visualization)
         thread = QThread()
         worker.moveToThread(thread)
         
@@ -865,8 +1127,211 @@ class MainLauncher(QMainWindow):
         # Update visualization page with new visualizer (this sets current_visualizer)
         self.show_visualization_page(visualizer, show_test_again=True)
         
-        # Run test episode
-        self.run_test_episode(env, self.test_agent, visualizer, self.test_num_discs)
+        # Run test episode with stored visualization preference
+        show_viz = getattr(self, 'test_show_visualization', True)
+        self.run_test_episode(env, self.test_agent, visualizer, self.test_num_discs, show_viz)
+    
+    def on_continue_training(self):
+        """Load existing model and continue training."""
+        from model_selection_dialog import ModelSelectionDialog
+        from model_manager import ModelManager
+        
+        try:
+            # Select model to continue training
+            dialog = ModelSelectionDialog(self, auto_select_latest=False)
+            result = dialog.exec()
+            
+            if result == QDialog.DialogCode.Accepted:
+                model_name, metadata = dialog.get_selected_model()
+                if not model_name:
+                    QMessageBox.warning(self, "No Selection", "Please select a model to continue training.")
+                    return
+                
+                # Load the model
+                model_manager = ModelManager()
+                agent, metadata = model_manager.load_model(model_name)
+                
+                # Show continuation configuration dialog
+                continue_config = self.show_continue_training_dialog(metadata)
+                if not continue_config:
+                    return  # User cancelled
+                
+                num_discs = continue_config['num_discs']
+                episodes = continue_config['episodes']
+                keep_epsilon = continue_config['keep_epsilon']
+                
+                # Handle disc count change
+                if num_discs != metadata.get('num_discs', 3):
+                    reply = QMessageBox.question(
+                        self,
+                        "Disc Count Changed",
+                        f"⚠️ Original model was trained with {metadata.get('num_discs', 3)} discs.\n"
+                        f"You are now training with {num_discs} discs.\n\n"
+                        f"The model architecture will be adapted, but performance may vary.\n\n"
+                        f"Continue?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if reply == QMessageBox.StandardButton.No:
+                        return
+                    
+                    # Recreate agent with new disc count but keep model weights
+                    from dqn_agent import DQNAgent
+                    new_state_size = num_discs * 3
+                    new_agent = DQNAgent(new_state_size, agent.action_size, agent.architecture_name)
+                    # Try to transfer weights where possible (first layers)
+                    try:
+                        for i, layer in enumerate(agent.model.layers):
+                            if i < len(new_agent.model.layers):
+                                new_agent.model.layers[i].set_weights(layer.get_weights())
+                    except:
+                        pass  # If shapes don't match, use new weights
+                    agent = new_agent
+                
+                if not keep_epsilon:
+                    agent.epsilon = 0.5  # Reset to initial value for exploration
+                
+                # Show info
+                info_msg = f"Continuing training from: {model_name}\n\n"
+                info_msg += f"Previous training: {metadata.get('episodes', 0)} episodes\n"
+                info_msg += f"Success rate: {metadata.get('success_rate', 0):.1f}%\n"
+                info_msg += f"Avg steps: {metadata.get('avg_steps', 0):.1f}\n\n"
+                info_msg += f"New training: {episodes} additional episodes\n"
+                info_msg += f"Discs: {num_discs}\n"
+                info_msg += f"Starting epsilon: {agent.epsilon:.3f}"
+                
+                QMessageBox.information(self, "Continue Training", info_msg)
+                
+                # Start training with loaded agent
+                from toh import TowerOfHanoiEnv
+                from visualizer import TowerOfHanoiVisualizer
+                
+                env = TowerOfHanoiEnv(num_discs=num_discs)
+                visualizer = TowerOfHanoiVisualizer(env, num_discs=num_discs, standalone=False)
+                
+                # Create performance graph
+                self.performance_graph = PerformanceGraphWidget()
+                self.performance_graph.set_optimal_steps(num_discs)
+                
+                # Show visualization page with graph
+                self.show_visualization_page(visualizer, performance_graph=self.performance_graph)
+                
+                config = {
+                    'num_discs': num_discs,
+                    'episodes': episodes,
+                    'show_every': 10,
+                    'save_every': 100,
+                    'architecture': metadata.get('architecture', 'medium')
+                }
+                
+                # Store agent for later access
+                self.current_agent = agent
+                
+                # Create worker and thread (same as on_train)
+                self.training_worker = TrainingWorker(env, agent, visualizer, config)
+                self.training_thread = QThread()
+                self.training_worker.moveToThread(self.training_thread)
+                
+                # Connect signals
+                self.training_thread.started.connect(self.training_worker.run)
+                self.training_worker.progress.connect(self.on_training_progress)
+                self.training_worker.finished.connect(self.on_training_finished)
+                self.training_worker.model_saved.connect(self.on_model_saved)
+                self.training_worker.update_info.connect(visualizer.update_info)
+                self.training_worker.update_state.connect(visualizer.update_state)
+                self.training_worker.animate_move.connect(visualizer.animate_move)
+                self.training_worker.performance_data.connect(self.on_performance_update)
+                self.training_worker.finished.connect(self.training_thread.quit)
+                
+                # Store references for updates
+                self.current_visualizer = visualizer
+                
+                # Start training
+                self.training_thread.start()
+                
+        except Exception as e:
+            import traceback
+            error_msg = f"Failed to continue training:\n{str(e)}\n\n{traceback.format_exc()}"
+            QMessageBox.critical(self, "Error", error_msg)
+    
+    def show_continue_training_dialog(self, metadata):
+        """Show dialog to configure continued training."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Continue Training Configuration")
+        dialog.setMinimumSize(450, 350)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Title
+        title = QLabel("Continue Training Configuration")
+        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        
+        # Model info
+        info = QLabel(
+            f"Previous training:\n"
+            f"  • Episodes: {metadata.get('episodes', 0)}\n"
+            f"  • Discs: {metadata.get('num_discs', 3)}\n"
+            f"  • Success rate: {metadata.get('success_rate', 0):.1f}%\n"
+            f"  • Epsilon: {metadata.get('epsilon', 1.0):.3f}"
+        )
+        info.setStyleSheet("background-color: #e7f3ff; padding: 10px; border-radius: 5px;")
+        layout.addWidget(info)
+        
+        # Form layout
+        form = QFormLayout()
+        
+        # Number of discs
+        discs_spin = QSpinBox()
+        discs_spin.setMinimum(3)
+        discs_spin.setMaximum(10)
+        discs_spin.setValue(metadata.get('num_discs', 3))
+        discs_spin.setToolTip("Number of discs to train with (can be different from original)")
+        form.addRow("Number of Discs:", discs_spin)
+        
+        # Additional episodes
+        episodes_spin = QSpinBox()
+        episodes_spin.setMinimum(100)
+        episodes_spin.setMaximum(10000)
+        episodes_spin.setSingleStep(100)
+        episodes_spin.setValue(500)
+        episodes_spin.setToolTip("Additional episodes to train")
+        form.addRow("Additional Episodes:", episodes_spin)
+        
+        # Keep epsilon
+        epsilon_check = QCheckBox("Keep current epsilon")
+        epsilon_check.setChecked(True)
+        epsilon_check.setToolTip("Keep exploration rate or reset to maximum")
+        form.addRow("Exploration:", epsilon_check)
+        
+        layout.addLayout(form)
+        
+        # Info text
+        info_text = QLabel(
+            "💡 Tip: Keeping epsilon allows continued learning from current knowledge.\n"
+            "Resetting epsilon increases exploration for new patterns."
+        )
+        info_text.setStyleSheet("color: #666; font-size: 11px; padding: 10px;")
+        info_text.setWordWrap(True)
+        layout.addWidget(info_text)
+        
+        layout.addStretch()
+        
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return {
+                'num_discs': discs_spin.value(),
+                'episodes': episodes_spin.value(),
+                'keep_epsilon': epsilon_check.isChecked()
+            }
+        return None
     
     def on_quick_train(self):
         """Run quick training."""

@@ -19,6 +19,10 @@ class TowerOfHanoiEnv:
         self.largest_disc_on_target = False  # Track if largest disc reached target
         self.move_sequence_history = []  # Track sequences of moves for pattern detection
         
+        # Progressive placement tracking - which discs are correctly placed on target
+        self.correctly_placed_discs = set()  # Set of disc numbers correctly placed on rod 2
+        self.current_target_disc = num_discs  # Start with largest disc as target
+        
         self._reset()
 
         # Define observation space as a Box
@@ -34,6 +38,8 @@ class TowerOfHanoiEnv:
         self.recent_moves = []  # Clear move history for new episode
         self.largest_disc_on_target = False  # Reset largest disc tracking
         self.move_sequence_history = []  # Clear sequence history for new episode
+        self.correctly_placed_discs = set()  # Reset progressive placement tracking
+        self.current_target_disc = self.num_discs  # Start with largest disc
         return self.state
 
     def step(self, action):
@@ -65,6 +71,76 @@ class TowerOfHanoiEnv:
         disc = self.state[from_rod].pop()
         self.state[to_rod].append(disc)
         self.steps += 1
+        
+        # Progressive placement reward system
+        # Check if disc is placed correctly on target rod
+        target_rod = 2  # Rod 3 (index 2) is the target
+        
+        # Determine which disc should be the current target
+        # Target discs in order: largest (num_discs) -> smallest (1)
+        expected_on_target = []
+        for d in range(self.num_discs, 0, -1):
+            if d in self.correctly_placed_discs:
+                expected_on_target.append(d)
+            else:
+                # This is the next disc that needs to be placed
+                self.current_target_disc = d
+                break
+        
+        # Check if target rod has correct discs at bottom
+        # Target rod should have discs in descending order from bottom
+        target_rod_state = self.state[target_rod]
+        is_correct_placement = True
+        
+        if len(target_rod_state) > 0:
+            # Verify discs on target are in correct order (largest at bottom)
+            for i in range(len(target_rod_state) - 1):
+                if target_rod_state[i] <= target_rod_state[i + 1]:
+                    is_correct_placement = False
+                    break
+        
+        # Check if we just placed or removed the current target disc
+        placed_target_disc = (to_rod == target_rod and disc == self.current_target_disc)
+        removed_from_target = (from_rod == target_rod and disc in self.correctly_placed_discs)
+        removed_target_disc = (from_rod == target_rod and disc == self.current_target_disc)
+        
+        # REWARD/PENALTY for progressive placement
+        if placed_target_disc and is_correct_placement:
+            # Successfully placed the current target disc on target rod!
+            # Check if it's placed correctly:
+            # - If it's the largest disc, target rod should only have this disc
+            # - If it's not the largest, it should be on top of the next larger disc
+            correct_position = False
+            if disc == self.num_discs:
+                # Largest disc - should be only disc on target
+                correct_position = (len(target_rod_state) == 1)
+            else:
+                # Smaller disc - should be on top of next larger disc (disc + 1)
+                if len(target_rod_state) >= 2:
+                    correct_position = (target_rod_state[-2] == disc + 1) and (disc + 1 in self.correctly_placed_discs)
+            
+            if correct_position:
+                reward += 30  # BIG REWARD for correct placement
+                self.correctly_placed_discs.add(disc)
+                # Update current target to next smaller disc
+                if disc > 1:
+                    self.current_target_disc = disc - 1
+        
+        elif removed_from_target:
+            # Removed a disc that was correctly placed - BAD!
+            reward -= 40  # HEAVY PENALTY for undoing progress
+            self.correctly_placed_discs.discard(disc)
+            # Update current target back to this disc
+            self.current_target_disc = disc
+        
+        elif removed_target_disc:
+            # Removed the current target disc from target rod before it was locked in
+            reward -= 15  # Penalty for removing target disc
+        
+        # Additional reward for keeping correctly placed discs on target
+        for placed_disc in self.correctly_placed_discs:
+            if placed_disc in self.state[target_rod]:
+                reward += 1  # Small bonus for maintaining correct state
         
         # Track the move for repetition detection (LOGIC 4)
         move = (from_rod, to_rod, disc)

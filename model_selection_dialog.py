@@ -5,9 +5,9 @@ Browse and select trained models with their performance metrics
 
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
                               QLabel, QTableWidget, QTableWidgetItem, QHeaderView,
-                              QMessageBox, QTextEdit)
+                              QMessageBox, QTextEdit, QInputDialog, QLineEdit)
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QColor
 from model_manager import ModelManager
 from datetime import datetime
 
@@ -49,11 +49,24 @@ class ModelSelectionDialog(QDialog):
         
         # Models table
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
-            "Model Name", "Architecture", "Created", "Episodes", "Success Rate", "Avg Steps", "Epsilon"
+            "★", "Model Name", "Architecture", "Created", "Episodes", "Success Rate", "Avg Steps", "Epsilon"
         ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        
+        # Make table sortable
+        self.table.setSortingEnabled(True)
+        
+        # Set column resize modes
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)  # Bookmark column fixed width
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)  # Model name resizable
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)  # Architecture resizable
+        for i in range(3, 8):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+        
+        self.table.setColumnWidth(0, 40)  # Bookmark column width
+        
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
@@ -77,6 +90,21 @@ class ModelSelectionDialog(QDialog):
         refresh_btn = QPushButton("🔄 Refresh")
         refresh_btn.clicked.connect(self.load_models)
         button_layout.addWidget(refresh_btn)
+        
+        bookmark_btn = QPushButton("⭐ Bookmark")
+        bookmark_btn.setToolTip("Toggle bookmark for selected model")
+        bookmark_btn.clicked.connect(self.toggle_bookmark)
+        button_layout.addWidget(bookmark_btn)
+        
+        comment_btn = QPushButton("💬 Comment")
+        comment_btn.setToolTip("Add or edit comment for selected model")
+        comment_btn.clicked.connect(self.edit_comment)
+        button_layout.addWidget(comment_btn)
+        
+        rename_btn = QPushButton("✏️ Rename")
+        rename_btn.setToolTip("Rename the selected model")
+        rename_btn.clicked.connect(self.rename_model)
+        button_layout.addWidget(rename_btn)
         
         preview_btn = QPushButton("👁️ Preview Architecture")
         preview_btn.setToolTip("Preview the neural network architecture")
@@ -122,6 +150,8 @@ class ModelSelectionDialog(QDialog):
     
     def load_models(self):
         """Load and display available models"""
+        # Disable sorting while loading to prevent issues
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         models = self.model_manager.list_models()
         
@@ -130,18 +160,29 @@ class ModelSelectionDialog(QDialog):
             item = QTableWidgetItem("No trained models found")
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(0, 0, item)
-            self.table.setSpan(0, 0, 1, 7)
+            self.table.setSpan(0, 0, 1, 8)
             return
         
         self.table.setRowCount(len(models))
         
         for row, (model_name, metadata) in enumerate(models):
+            # Bookmark indicator
+            bookmark_item = QTableWidgetItem()
+            is_bookmarked = metadata.get('bookmarked', False)
+            bookmark_item.setText("⭐" if is_bookmarked else "")
+            bookmark_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if is_bookmarked:
+                bookmark_item.setBackground(QColor("#fff9c4"))
+            self.table.setItem(row, 0, bookmark_item)
+            
             # Model name
-            self.table.setItem(row, 0, QTableWidgetItem(model_name))
+            name_item = QTableWidgetItem(model_name)
+            name_item.setData(Qt.ItemDataRole.UserRole, (model_name, metadata))  # Store data in name column
+            self.table.setItem(row, 1, name_item)
             
             # Architecture
             architecture = metadata.get('architecture', 'Unknown')
-            self.table.setItem(row, 1, QTableWidgetItem(architecture))
+            self.table.setItem(row, 2, QTableWidgetItem(architecture))
             
             # Created date
             created_at = metadata.get('created_at', 'Unknown')
@@ -151,32 +192,46 @@ class ModelSelectionDialog(QDialog):
                     created_at = dt.strftime("%Y-%m-%d %H:%M")
                 except:
                     pass
-            self.table.setItem(row, 2, QTableWidgetItem(created_at))
+            self.table.setItem(row, 3, QTableWidgetItem(created_at))
             
             # Episodes
             episodes = metadata.get('episodes', '-')
-            self.table.setItem(row, 3, QTableWidgetItem(str(episodes)))
+            episodes_item = QTableWidgetItem()
+            episodes_item.setData(Qt.ItemDataRole.DisplayRole, episodes)
+            self.table.setItem(row, 4, episodes_item)
             
             # Success rate
             success_rate = metadata.get('success_rate', '-')
+            success_item = QTableWidgetItem()
             if success_rate != '-':
-                success_rate = f"{success_rate:.1f}%"
-            self.table.setItem(row, 4, QTableWidgetItem(str(success_rate)))
+                success_item.setData(Qt.ItemDataRole.DisplayRole, float(success_rate))
+                success_item.setText(f"{success_rate:.1f}%")
+            else:
+                success_item.setText('-')
+            self.table.setItem(row, 5, success_item)
             
             # Average steps
             avg_steps = metadata.get('avg_steps', '-')
+            steps_item = QTableWidgetItem()
             if avg_steps != '-':
-                avg_steps = f"{avg_steps:.1f}"
-            self.table.setItem(row, 5, QTableWidgetItem(str(avg_steps)))
+                steps_item.setData(Qt.ItemDataRole.DisplayRole, float(avg_steps))
+                steps_item.setText(f"{avg_steps:.1f}")
+            else:
+                steps_item.setText('-')
+            self.table.setItem(row, 6, steps_item)
             
             # Epsilon
             epsilon = metadata.get('epsilon', '-')
+            epsilon_item = QTableWidgetItem()
             if epsilon != '-':
-                epsilon = f"{epsilon:.3f}"
-            self.table.setItem(row, 6, QTableWidgetItem(str(epsilon)))
-            
-            # Store metadata in first cell
-            self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, (model_name, metadata))
+                epsilon_item.setData(Qt.ItemDataRole.DisplayRole, float(epsilon))
+                epsilon_item.setText(f"{epsilon:.3f}")
+            else:
+                epsilon_item.setText('-')
+            self.table.setItem(row, 7, epsilon_item)
+        
+        # Re-enable sorting
+        self.table.setSortingEnabled(True)
     
     def on_selection_changed(self):
         """Handle model selection change"""
@@ -186,7 +241,12 @@ class ModelSelectionDialog(QDialog):
             return
         
         row = selected_items[0].row()
-        data = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        # Get data from name column (column 1)
+        name_item = self.table.item(row, 1)
+        if not name_item:
+            return
+            
+        data = name_item.data(Qt.ItemDataRole.UserRole)
         
         if data:
             model_name, metadata = data
@@ -200,6 +260,12 @@ class ModelSelectionDialog(QDialog):
             details += f"<b>Action Size:</b> {metadata.get('action_size', '-')}<br>"
             details += f"<b>Gamma:</b> {metadata.get('gamma', '-')}<br>"
             details += f"<b>Learning Rate:</b> {metadata.get('learning_rate', '-')}<br>"
+            
+            if metadata.get('bookmarked'):
+                details += f"<b>Bookmarked:</b> ⭐ Yes<br>"
+            
+            if 'comment' in metadata and metadata['comment']:
+                details += f"<b>Comment:</b> {metadata['comment']}<br>"
             
             if 'notes' in metadata:
                 details += f"<b>Notes:</b> {metadata['notes']}<br>"
@@ -225,6 +291,92 @@ class ModelSelectionDialog(QDialog):
                 self.load_models()
             else:
                 QMessageBox.warning(self, "Error", "Failed to delete model.")
+    
+    def toggle_bookmark(self):
+        """Toggle bookmark status for selected model"""
+        if not self.selected_model or not self.selected_metadata:
+            QMessageBox.warning(self, "No Selection", "Please select a model to bookmark.")
+            return
+        
+        is_bookmarked = self.selected_metadata.get('bookmarked', False)
+        new_status = not is_bookmarked
+        
+        if self.model_manager.update_metadata(self.selected_model, {'bookmarked': new_status}):
+            status_text = "bookmarked" if new_status else "unbookmarked"
+            QMessageBox.information(self, "Success", f"Model '{self.selected_model}' {status_text}.")
+            self.load_models()
+            # Re-select the same model
+            for row in range(self.table.rowCount()):
+                name_item = self.table.item(row, 1)
+                if name_item and name_item.text() == self.selected_model:
+                    self.table.selectRow(row)
+                    break
+        else:
+            QMessageBox.warning(self, "Error", "Failed to update bookmark.")
+    
+    def edit_comment(self):
+        """Add or edit comment for selected model"""
+        if not self.selected_model or not self.selected_metadata:
+            QMessageBox.warning(self, "No Selection", "Please select a model to add a comment.")
+            return
+        
+        current_comment = self.selected_metadata.get('comment', '')
+        
+        comment, ok = QInputDialog.getMultiLineText(
+            self,
+            "Edit Comment",
+            f"Enter comment for '{self.selected_model}':",
+            current_comment
+        )
+        
+        if ok:
+            if self.model_manager.update_metadata(self.selected_model, {'comment': comment}):
+                QMessageBox.information(self, "Success", "Comment updated successfully.")
+                self.load_models()
+                # Re-select the same model
+                for row in range(self.table.rowCount()):
+                    name_item = self.table.item(row, 1)
+                    if name_item and name_item.text() == self.selected_model:
+                        self.table.selectRow(row)
+                        break
+            else:
+                QMessageBox.warning(self, "Error", "Failed to update comment.")
+    
+    def rename_model(self):
+        """Rename the selected model"""
+        if not self.selected_model:
+            QMessageBox.warning(self, "No Selection", "Please select a model to rename.")
+            return
+        
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Model",
+            f"Enter new name for '{self.selected_model}':",
+            QLineEdit.EchoMode.Normal,
+            self.selected_model
+        )
+        
+        if ok and new_name:
+            if new_name == self.selected_model:
+                return  # No change
+            
+            # Validate name
+            if not new_name.replace('_', '').replace('-', '').isalnum():
+                QMessageBox.warning(self, "Invalid Name", "Model name can only contain letters, numbers, underscores, and hyphens.")
+                return
+            
+            if self.model_manager.rename_model(self.selected_model, new_name):
+                QMessageBox.information(self, "Success", f"Model renamed to '{new_name}'.")
+                self.selected_model = new_name
+                self.load_models()
+                # Select the renamed model
+                for row in range(self.table.rowCount()):
+                    name_item = self.table.item(row, 1)
+                    if name_item and name_item.text() == new_name:
+                        self.table.selectRow(row)
+                        break
+            else:
+                QMessageBox.warning(self, "Error", "Failed to rename model. Name may already exist.")
     
     def select_latest_model(self):
         """Auto-select the latest model"""
