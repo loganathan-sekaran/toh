@@ -56,7 +56,8 @@ class TrainingWorker(QObject):
         import numpy as np
         from model_manager import ModelManager
         
-        state_size = np.prod(self.env.observation_space.shape)
+        # Use agent's state_size (which supports maximum discs) instead of env's
+        state_size = self.agent.state_size
         self.success_count = 0
         self.total_steps = 0
         episode_steps_list = []
@@ -93,6 +94,11 @@ class TrainingWorker(QObject):
             
             while not done and steps < 1000:
                 flat_state = flatten_state(state, self.config['num_discs'])
+                
+                # Pad state to match agent's state_size (for generalization across disc counts)
+                if len(flat_state) < state_size:
+                    flat_state = np.pad(flat_state, (0, state_size - len(flat_state)), 'constant')
+                
                 flat_state = np.reshape(flat_state, [1, state_size])
                 
                 # Get valid actions to avoid learning from invalid moves
@@ -113,6 +119,11 @@ class TrainingWorker(QObject):
                     print(f"Episode {episode}, Step {steps}: {reward_type} = {reward:.1f} (action: {from_rod}→{to_rod}, disc: {disc})")
                 
                 flat_next_state = flatten_state(next_state, self.config['num_discs'])
+                
+                # Pad next state to match agent's state_size
+                if len(flat_next_state) < state_size:
+                    flat_next_state = np.pad(flat_next_state, (0, state_size - len(flat_next_state)), 'constant')
+                
                 flat_next_state = np.reshape(flat_next_state, [1, state_size])
                 
                 self.agent.remember(flat_state, action, reward, flat_next_state, done)
@@ -674,8 +685,23 @@ class MainLauncher(QMainWindow):
             
             # Initialize
             env = TowerOfHanoiEnv(num_discs=config['num_discs'])
-            state_size = np.prod(env.observation_space.shape)
+            
+            # Use MAXIMUM state size to support multiple disc counts
+            # This allows the model to generalize across different disc counts
+            MAX_DISCS = 10  # Maximum discs we want to support
+            state_size = MAX_DISCS * 3  # 3 rods, up to 10 discs each
             action_size = env.action_space.n
+            
+            # Show info about generalization capability
+            QMessageBox.information(
+                self,
+                "Training Configuration",
+                f"Training with {config['num_discs']} discs.\n\n"
+                f"Model capacity: Up to {MAX_DISCS} discs\n"
+                f"State size: {state_size} (padded for generalization)\n\n"
+                f"This allows the model to work with other disc counts\n"
+                f"(3-{MAX_DISCS}) if trained on multiple configurations."
+            )
             
             # Create agent with selected architecture
             agent = DQNAgent(state_size, action_size, architecture_name=config['architecture'])
@@ -780,28 +806,28 @@ class MainLauncher(QMainWindow):
                     # Show model architecture first
                     self.show_model_architecture(agent.model, metadata)
                     
+                    # Calculate maximum disc count supported by model
+                    max_discs = agent.state_size // 3
+                    
                     # Show test configuration dialog
-                    test_config = self.show_test_config_dialog(metadata.get('num_discs', 3), agent.state_size)
+                    test_config = self.show_test_config_dialog(metadata.get('num_discs', 3), agent.state_size, max_discs)
                     if not test_config:
                         return  # User cancelled
                     
                     num_discs = test_config['num_discs']
                     show_visualization = test_config['show_visualization']
                     
-                    # Validate state size compatibility
-                    expected_state_size = num_discs * 3  # 3 rods
-                    if expected_state_size != agent.state_size:
-                        reply = QMessageBox.warning(
+                    # Validate disc count is within model capacity
+                    if num_discs > max_discs:
+                        QMessageBox.warning(
                             self,
-                            "State Size Mismatch",
-                            f"⚠️ Warning: This model was trained with {agent.state_size // 3} discs (state size: {agent.state_size}).\n\n"
-                            f"Testing with {num_discs} discs requires state size: {expected_state_size}.\n\n"
-                            f"The model may not work correctly with a different number of discs.\n\n"
-                            f"Would you like to continue anyway?",
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                            "Disc Count Too High",
+                            f"⚠️ This model's state size ({agent.state_size}) can only handle up to {max_discs} discs.\n\n"
+                            f"Testing with {num_discs} discs is not possible.\n\n"
+                            f"Please select {max_discs} discs or fewer.",
+                            QMessageBox.StandardButton.Ok
                         )
-                        if reply == QMessageBox.StandardButton.No:
-                            return
+                        return
                     
                     # Run test with visualization
                     from toh import TowerOfHanoiEnv
@@ -833,11 +859,11 @@ class MainLauncher(QMainWindow):
             error_msg = f"Error in test dialog:\n{str(e)}\n\n{traceback.format_exc()}"
             QMessageBox.critical(self, "Error", error_msg)
     
-    def show_test_config_dialog(self, default_num_discs, model_state_size):
+    def show_test_config_dialog(self, default_num_discs, model_state_size, max_discs):
         """Show dialog to configure test parameters."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Test Configuration")
-        dialog.setMinimumSize(450, 300)
+        dialog.setMinimumSize(450, 350)
         
         layout = QVBoxLayout(dialog)
         
@@ -848,21 +874,31 @@ class MainLauncher(QMainWindow):
         layout.addWidget(title)
         
         # Model info
-        trained_discs = model_state_size // 3
-        info = QLabel(f"Model trained with: {trained_discs} discs")
+        info = QLabel(f"Model state size: {model_state_size} (supports up to {max_discs} discs)")
         info.setStyleSheet("color: #666; font-style: italic; padding: 5px;")
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(info)
         
+        # Important notice about generalization
+        notice = QLabel(
+            f"💡 This model can test with {max_discs} discs or fewer.\n"
+            f"If trained on multiple disc counts (e.g., 3 and 4), it can generalize to others.\n"
+            f"States are automatically padded to match the model's capacity."
+        )
+        notice.setStyleSheet("color: #004085; background-color: #cce5ff; padding: 10px; border-radius: 5px; border: 1px solid #b8daff;")
+        notice.setWordWrap(True)
+        notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(notice)
+        
         # Form layout
         form = QFormLayout()
         
-        # Number of discs
+        # Number of discs (user can select within capacity)
         discs_spin = QSpinBox()
         discs_spin.setMinimum(3)
-        discs_spin.setMaximum(10)
-        discs_spin.setValue(default_num_discs)
-        discs_spin.setToolTip("Select number of discs for testing (3-10)")
+        discs_spin.setMaximum(max_discs)
+        discs_spin.setValue(min(default_num_discs, max_discs))
+        discs_spin.setToolTip(f"Select number of discs for testing (3-{max_discs})")
         form.addRow("Number of Discs:", discs_spin)
         
         # Visualization toggle
@@ -873,11 +909,26 @@ class MainLauncher(QMainWindow):
         
         layout.addLayout(form)
         
-        # Warning for higher disc counts
-        warning = QLabel("⚠️ Note: Higher disc counts may take longer to solve")
-        warning.setStyleSheet("color: #856404; background-color: #fff3cd; padding: 10px; border-radius: 5px;")
-        warning.setWordWrap(True)
-        layout.addWidget(warning)
+        # Info about disc counts - update dynamically based on selection
+        def update_info_text():
+            selected_discs = discs_spin.value()
+            if selected_discs <= 3:
+                info_text = f"💡 {selected_discs} discs: Should solve quickly (optimal: {2**selected_discs - 1} moves)"
+            elif selected_discs == 4:
+                info_text = f"💡 {selected_discs} discs: May take 15-31 moves (optimal: 15 moves)"
+            else:
+                info_text = f"💡 {selected_discs} discs: May take longer (optimal: {2**selected_discs - 1} moves)"
+            
+            info_label.setText(info_text)
+        
+        info_label = QLabel()
+        info_label.setStyleSheet("color: #004085; background-color: #cce5ff; padding: 10px; border-radius: 5px; border: 1px solid #b8daff;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # Connect spinner to update info
+        discs_spin.valueChanged.connect(update_info_text)
+        update_info_text()  # Initialize
         
         layout.addStretch()
         
