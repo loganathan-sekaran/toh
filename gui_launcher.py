@@ -378,33 +378,27 @@ class MainLauncher(QMainWindow):
         """Create the main menu page."""
         menu_widget = QWidget()
         layout = QVBoxLayout(menu_widget)
-        layout.setSpacing(20)
-        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(10)
+        layout.setContentsMargins(30, 15, 30, 15)  # Further reduced margins
         
         # Title
-        title = QLabel("🗼  Tower of Hanoi - RL Trainer  🗼")
+        title = QLabel("🗼  Tower of Hanoi - RL Trainer")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_font = QFont()
-        title_font.setPointSize(24)
+        title_font.setPointSize(18)  # Reduced from 20
         title_font.setBold(True)
         title.setFont(title_font)
-        layout.addWidget(title)
+        title.setMaximumHeight(40)  # Prevent title from expanding
+        layout.addWidget(title, 0)  # 0 = no stretch
         
-        # Subtitle
-        subtitle = QLabel("Train an AI agent to solve Tower of Hanoi using Deep Q-Learning")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle_font = QFont()
-        subtitle_font.setPointSize(12)
-        subtitle.setFont(subtitle_font)
-        subtitle.setStyleSheet("color: #666;")
-        layout.addWidget(subtitle)
-        
-        layout.addSpacing(20)
+        # Small spacing after title
+        layout.addSpacing(5)
         
         # Buttons container
         buttons_widget = QWidget()
+        buttons_widget.setMaximumHeight(560)  # 8 buttons * 62px + 7 gaps * 8px = 552px
         buttons_layout = QVBoxLayout(buttons_widget)
-        buttons_layout.setSpacing(15)
+        buttons_layout.setSpacing(8)  # Reduced from 15 to make more compact
         
         # Create menu buttons
         self.create_menu_button(buttons_layout, "🎬  Demo", 
@@ -439,17 +433,18 @@ class MainLauncher(QMainWindow):
                                "Learn how Tower of Hanoi works",
                                self.on_tutorial)
         
-        layout.addWidget(buttons_widget)
-        layout.addStretch()
+        layout.addWidget(buttons_widget, 0)  # 0 = no stretch, keep compact
         
         # Exit button
         exit_btn = QPushButton("❌  Exit")
+        exit_btn.setMinimumHeight(38)
+        exit_btn.setMaximumHeight(38)  # Prevent expansion
         exit_btn.setStyleSheet("""
             QPushButton {
                 background-color: #dc3545;
                 color: white;
                 border: none;
-                padding: 10px;
+                padding: 8px;
                 font-size: 14px;
                 border-radius: 5px;
             }
@@ -458,26 +453,28 @@ class MainLauncher(QMainWindow):
             }
         """)
         exit_btn.clicked.connect(self.close)
-        layout.addWidget(exit_btn)
+        layout.addWidget(exit_btn, 0)  # 0 = no stretch
         
         return menu_widget
     
     def create_menu_button(self, layout, text, description, callback):
         """Create a styled menu button with description."""
         container = QWidget()
+        container.setMaximumHeight(62)  # Fix height: 42 (button) + 15 (desc) + 5 (spacing)
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(2)
         
         btn = QPushButton(text)
-        btn.setMinimumHeight(50)
+        btn.setMinimumHeight(42)  # Reduced from 50
+        btn.setMaximumHeight(42)  # Prevent expansion
         btn.setStyleSheet("""
             QPushButton {
                 background-color: #007bff;
                 color: white;
                 border: none;
-                padding: 12px;
-                font-size: 16px;
+                padding: 8px 12px;
+                font-size: 15px;
                 font-weight: bold;
                 border-radius: 8px;
                 text-align: left;
@@ -495,7 +492,7 @@ class MainLauncher(QMainWindow):
         desc_label = QLabel(description)
         desc_label.setStyleSheet("""
             color: #666;
-            font-size: 11px;
+            font-size: 10px;
             padding-left: 12px;
         """)
         container_layout.addWidget(desc_label)
@@ -809,13 +806,14 @@ class MainLauncher(QMainWindow):
                     # Calculate maximum disc count supported by model
                     max_discs = agent.state_size // 3
                     
-                    # Show test configuration dialog
-                    test_config = self.show_test_config_dialog(metadata.get('num_discs', 3), agent.state_size, max_discs)
+                    # Show test configuration dialog with metadata
+                    test_config = self.show_test_config_dialog(metadata.get('num_discs', 3), agent.state_size, max_discs, metadata)
                     if not test_config:
                         return  # User cancelled
                     
                     num_discs = test_config['num_discs']
                     show_visualization = test_config['show_visualization']
+                    exploration = test_config['exploration']
                     
                     # Validate disc count is within model capacity
                     if num_discs > max_discs:
@@ -843,12 +841,14 @@ class MainLauncher(QMainWindow):
                     self.test_agent = agent
                     self.test_num_discs = num_discs
                     self.test_show_visualization = show_visualization
+                    self.test_exploration = exploration
+                    self.test_metadata = metadata
                     self.test_trained_num_discs = agent.state_size // 3  # Store original training disc count
                     
                     self.show_visualization_page(visualizer, show_test_again=True)
                     
-                    # Run test episode
-                    self.run_test_episode(env, agent, visualizer, num_discs, show_visualization)
+                    # Run test episode with exploration
+                    self.run_test_episode(env, agent, visualizer, num_discs, show_visualization, exploration, metadata)
                         
                 except Exception as e:
                     import traceback
@@ -859,11 +859,11 @@ class MainLauncher(QMainWindow):
             error_msg = f"Error in test dialog:\n{str(e)}\n\n{traceback.format_exc()}"
             QMessageBox.critical(self, "Error", error_msg)
     
-    def show_test_config_dialog(self, default_num_discs, model_state_size, max_discs):
+    def show_test_config_dialog(self, default_num_discs, model_state_size, max_discs, metadata=None):
         """Show dialog to configure test parameters."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Test Configuration")
-        dialog.setMinimumSize(450, 350)
+        dialog.setMinimumSize(450, 450)
         
         layout = QVBoxLayout(dialog)
         
@@ -907,6 +907,42 @@ class MainLauncher(QMainWindow):
         viz_check.setToolTip("Uncheck for faster testing without animation")
         form.addRow("Visualization:", viz_check)
         
+        # Exploration parameter (temperature for action selection)
+        from PyQt6.QtWidgets import QSlider
+        exploration_slider = QSlider(Qt.Orientation.Horizontal)
+        exploration_slider.setMinimum(0)
+        exploration_slider.setMaximum(100)
+        exploration_slider.setValue(10)  # Default 10% exploration
+        exploration_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        exploration_slider.setTickInterval(10)
+        
+        exploration_label = QLabel("10%")
+        exploration_label.setStyleSheet("font-weight: bold; color: #007bff;")
+        
+        def update_exploration_label(value):
+            exploration_label.setText(f"{value}%")
+        
+        exploration_slider.valueChanged.connect(update_exploration_label)
+        
+        exploration_layout = QHBoxLayout()
+        exploration_layout.addWidget(exploration_slider, stretch=4)
+        exploration_layout.addWidget(exploration_label, stretch=1)
+        
+        exploration_widget = QWidget()
+        exploration_widget.setLayout(exploration_layout)
+        
+        form.addRow("Exploration:", exploration_widget)
+        
+        # Exploration help text
+        exploration_help = QLabel(
+            "💡 Exploration adds randomness to action selection.\n"
+            "Higher values help escape loops but may make solving slower.\n"
+            "Recommended: 10-20% for stuck models, 0% for well-trained models."
+        )
+        exploration_help.setStyleSheet("color: #666; font-size: 10px; padding: 5px; background-color: #f8f9fa; border-radius: 3px;")
+        exploration_help.setWordWrap(True)
+        form.addRow("", exploration_help)
+        
         layout.addLayout(form)
         
         # Info about disc counts - update dynamically based on selection
@@ -943,7 +979,9 @@ class MainLauncher(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             return {
                 'num_discs': discs_spin.value(),
-                'show_visualization': viz_check.isChecked()
+                'show_visualization': viz_check.isChecked(),
+                'exploration': exploration_slider.value() / 100.0,  # Convert to 0.0-1.0
+                'metadata': metadata  # Pass along for avg_steps calculation
             }
         return None
     
@@ -980,8 +1018,8 @@ class MainLauncher(QMainWindow):
         
         dialog.exec()
     
-    def run_test_episode(self, env, agent, visualizer, num_discs, show_visualization=True):
-        """Run a single test episode with optional visualization"""
+    def run_test_episode(self, env, agent, visualizer, num_discs, show_visualization=True, exploration=0.1, metadata=None):
+        """Run a single test episode with optional visualization and exploration"""
         from util import flatten_state
         import numpy as np
         
@@ -992,13 +1030,14 @@ class MainLauncher(QMainWindow):
             show_message = pyqtSignal(str, str, bool)  # title, message, success
             finished = pyqtSignal()
             
-            def __init__(self, env, agent, num_discs, show_visualization):
+            def __init__(self, env, agent, num_discs, show_visualization, exploration, metadata):
                 super().__init__()
                 self.env = env
                 self.agent = agent
                 self.num_discs = num_discs
                 self.show_visualization = show_visualization
-                self.num_discs = num_discs
+                self.exploration = exploration
+                self.metadata = metadata
             
             def run(self):
                 import time
@@ -1013,11 +1052,26 @@ class MainLauncher(QMainWindow):
                 invalid_move_count = 0
                 last_actions = []
                 
+                # Set reasonable step limit based on training performance
+                # If we have avg_steps from training, use 2x that, otherwise use 10x optimal
+                optimal_steps = (2 ** self.num_discs) - 1
+                
+                if self.metadata and 'avg_steps' in self.metadata:
+                    # Use 2x average training steps, with a minimum of 5x optimal
+                    avg_training_steps = self.metadata['avg_steps']
+                    max_steps = max(int(avg_training_steps * 2), optimal_steps * 5)
+                    print(f"Using training avg ({avg_training_steps:.1f}) -> max_steps: {max_steps}")
+                else:
+                    # No training data, use 10x optimal
+                    max_steps = optimal_steps * 10
+                
                 print("\n=== TEST EPISODE STARTED ===")
                 print(f"Initial state: {self.env.state}")
                 print(f"Agent state_size: {self.agent.state_size}, Test num_discs: {self.num_discs}")
+                print(f"Optimal steps: {optimal_steps}, Max steps: {max_steps}")
+                print(f"Exploration rate: {self.exploration * 100:.0f}%")
                 
-                while not done and steps < 100:
+                while not done and steps < max_steps:
                     flat_state = flatten_state(state, self.num_discs)
                     
                     # Handle state size mismatch by padding or truncating
@@ -1042,8 +1096,25 @@ class MainLauncher(QMainWindow):
                         if action not in valid_actions:
                             masked_q_values[action] = -np.inf
                     
-                    # Select best valid action
-                    action = np.argmax(masked_q_values)
+                    # Epsilon-greedy action selection with configurable exploration
+                    use_random = False
+                    if np.random.random() < self.exploration:
+                        # Explore: choose random valid action
+                        action = np.random.choice(valid_actions)
+                        use_random = True
+                        print(f"  🎲 Exploration: Random action selected")
+                    else:
+                        # Exploit: select best action based on Q-values
+                        action = np.argmax(masked_q_values)
+                    
+                    # Additional loop-breaking logic (less aggressive now with exploration)
+                    if not use_random and len(last_actions) >= 6:
+                        recent_6 = last_actions[-6:]
+                        # If stuck in obvious pattern, force exploration
+                        if len(set(recent_6)) <= 2:
+                            action = np.random.choice(valid_actions)
+                            use_random = True
+                            print(f"  🔄 Loop detected: Forced random action")
                     
                     # Track repeating actions
                     last_actions.append(action)
@@ -1070,24 +1141,48 @@ class MainLauncher(QMainWindow):
                     print(f"  Reward: {reward}, Total: {total_reward}")
                     print(f"  Valid move: {disc is not None}")
                     
-                    # Track invalid moves
-                    if reward < 0:
+                    # Track TRULY invalid moves (reward <= -40 indicates serious rule violation)
+                    # The -50 penalty from environment might be too strict with reward shaping
+                    if reward <= -40:
                         invalid_move_count += 1
-                        print(f"  ⚠️ INVALID MOVE! Count: {invalid_move_count}")
+                        print(f"  ⚠️ TRULY INVALID MOVE (rule violation)! Count: {invalid_move_count}")
                         
-                        # Check for stuck pattern
+                        # More lenient: allow up to 5 invalid moves before stopping
                         if invalid_move_count > 5:
                             print(f"  ⚠️ TOO MANY INVALID MOVES!")
                             print(f"  Last 10 actions: {last_actions}")
-                            # Break if truly stuck
-                            if len(set(last_actions[-5:])) <= 2:
-                                print("  ⚠️ STUCK IN LOOP - STOPPING TEST")
+                            self.show_message.emit("Test Stopped", 
+                                                  f"Agent made {invalid_move_count} rule-violating moves in {steps} steps.",
+                                                  False)
+                            break
+                    elif reward < 0:
+                        # Negative reward but not invalid move (oscillation, inefficiency, etc.)
+                        print(f"  ℹ️ Suboptimal move (penalty: {reward})")
+                    
+                    # Detect oscillation/stuck patterns regardless of reward
+                    if len(last_actions) >= 6:
+                        # Check if stuck in short loop (repeating 2-3 actions)
+                        recent_6 = last_actions[-6:]
+                        if (recent_6[0] == recent_6[2] == recent_6[4] and 
+                            recent_6[1] == recent_6[3] == recent_6[5]):
+                            print("  ⚠️ STUCK IN 2-ACTION LOOP - STOPPING TEST")
+                            print(f"  Pattern: {recent_6}")
+                            self.show_message.emit("Test Stopped", 
+                                                  f"Agent stuck in oscillation loop after {steps} steps.",
+                                                  False)
+                            break
+                        
+                        # Check if last 8 moves are just 2-3 unique actions
+                        if len(last_actions) >= 8:
+                            recent_8 = last_actions[-8:]
+                            unique_actions = len(set(recent_8))
+                            if unique_actions <= 2:
+                                print(f"  ⚠️ STUCK - Only {unique_actions} unique actions in last 8 moves")
+                                print(f"  Last actions: {last_actions}")
                                 self.show_message.emit("Test Stopped", 
-                                                      f"Agent stuck after {steps} steps with {invalid_move_count} invalid moves.",
+                                                      f"Agent stuck (limited action diversity) after {steps} steps.",
                                                       False)
                                 break
-                    else:
-                        invalid_move_count = 0  # Reset on valid move
                     
                     # Visualize only if enabled
                     if self.show_visualization:
@@ -1122,15 +1217,15 @@ class MainLauncher(QMainWindow):
                                                   False)
                         break
                 
-                if not done and steps >= 100:
-                    print(f"\n=== TIMEOUT - {steps} STEPS ===")
+                if not done and steps >= max_steps:
+                    print(f"\n=== TIMEOUT - {steps} STEPS (max: {max_steps}) ===")
                     self.show_message.emit("Timeout", 
-                                          f"Model did not solve puzzle in {steps} steps.",
+                                          f"Model did not solve puzzle in {steps} steps (max: {max_steps}, optimal: {optimal_steps}).",
                                           False)
                 
                 self.finished.emit()
         
-        worker = TestWorker(env, agent, num_discs, show_visualization)
+        worker = TestWorker(env, agent, num_discs, show_visualization, exploration, metadata)
         thread = QThread()
         worker.moveToThread(thread)
         
@@ -1178,9 +1273,12 @@ class MainLauncher(QMainWindow):
         # Update visualization page with new visualizer (this sets current_visualizer)
         self.show_visualization_page(visualizer, show_test_again=True)
         
-        # Run test episode with stored visualization preference
+        # Run test episode with stored parameters
         show_viz = getattr(self, 'test_show_visualization', True)
-        self.run_test_episode(env, self.test_agent, visualizer, self.test_num_discs, show_viz)
+        exploration = getattr(self, 'test_exploration', 0.1)
+        metadata = getattr(self, 'test_metadata', None)
+        
+        self.run_test_episode(env, self.test_agent, visualizer, self.test_num_discs, show_viz, exploration, metadata)
     
     def on_continue_training(self):
         """Load existing model and continue training."""

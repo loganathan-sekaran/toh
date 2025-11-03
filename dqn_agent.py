@@ -21,23 +21,29 @@ class DQNAgent:
         self.action_size = action_size
         self.architecture_name = architecture_name
 
-        # Hyperparameters - optimized for Tower of Hanoi with strong reward shaping
-        self.gamma = 0.90  # Lower discount to prioritize immediate rewards/penalties
-        self.epsilon = 0.5  # Start with 50% exploitation (was 1.0 - too much random exploration)
+        # Hyperparameters - BALANCED for learning (not too aggressive)
+        self.gamma = 0.95  # Higher discount for long-term planning
+        self.epsilon = 1.0  # Start with full exploration
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.99  # Faster decay to reach min in ~100 episodes (was 0.995)
-        self.learning_rate = 0.003  # Increased for faster learning from penalties (was 0.001)
-        self.batch_size = 64  # Larger batch for more stable learning (was 32)
-        self.penalty_scale = 2.0  # Scale penalties by this factor when storing in memory
+        self.epsilon_decay = 0.995  # Slower decay for better exploration
+        self.learning_rate = 0.001  # Standard learning rate (was 0.003 - too fast)
+        self.batch_size = 32  # Standard batch size
+        
+        # REDUCED penalty/reward scaling - let environment rewards speak for themselves
+        self.penalty_scale = 1.2  # Minimal scaling (was 2.0 - too aggressive)
 
         # Replay memory
         self.memory = deque(maxlen=10000)  # Larger memory for better learning
         
-        # Oscillation detection - track recent actions and FORCE exploration to break loops
+        # Episode trajectory tracking - MUCH MORE CONSERVATIVE
+        self.current_episode_trajectory = []  # Store (state, action, reward) for current episode
+        self.trajectory_penalty_propagation = 0.2  # Reduced from 0.5 - less aggressive propagation
+        
+        # Oscillation detection - LESS aggressive forcing
         self.recent_actions = deque(maxlen=20)  # Track last 20 actions
-        self.oscillation_threshold = 6  # If same pattern repeats in 6 actions, break it
+        self.oscillation_threshold = 8  # Increased from 6 - more patient before forcing
         self.force_random_actions = 0  # Counter: force N random actions when oscillation detected
-        self.oscillation_penalty_scale = 3.0  # Extra penalty scaling for oscillation experiences
+        self.oscillation_penalty_scale = 1.5  # Reduced from 3.0 - less aggressive scaling
 
         # Get the model architecture
         self.architecture = ModelFactory.get_architecture(architecture_name)
@@ -68,13 +74,24 @@ class DQNAgent:
     def reset_episode(self):
         """Reset episode-specific tracking (call at start of each episode)."""
         self.recent_actions.clear()
+        self.current_episode_trajectory = []  # Clear trajectory for new episode
 
     def remember(self, state, action, reward, next_state, done):
         """
-        Store experiences in memory.
-        Applies penalty scaling to amplify negative rewards for faster learning.
-        Extra scaling for oscillation-related penalties.
+        Store experiences in memory with enhanced temporal credit assignment.
+        
+        When a large penalty occurs, this method:
+        1. Stores the current experience normally
+        2. Propagates a fraction of the penalty backwards to recent actions
+           that led to this state (helping the agent learn which early 
+           choices led to bad outcomes)
+        
+        This helps the agent learn to "backtrack mentally" during training
+        by understanding the consequences of earlier actions.
         """
+        # Add to current episode trajectory (for penalty propagation)
+        self.current_episode_trajectory.append((state, action, reward, next_state, done))
+        
         # Scale penalties (negative rewards) to make them more impactful
         if reward < 0:
             # Check if this is a severe penalty (likely oscillation-related)
@@ -85,7 +102,39 @@ class DQNAgent:
         else:
             scaled_reward = reward
         
+        # Store the current experience
         self.memory.append((state, action, scaled_reward, next_state, done))
+        
+        # TEMPORAL CREDIT ASSIGNMENT: Only for SEVERE penalties (>= -30)
+        # And only propagate to immediate previous step to avoid noise
+        if reward <= -30 and len(self.current_episode_trajectory) > 1:
+            # Only propagate to previous 2 steps (much more conservative)
+            propagation_depth = min(2, len(self.current_episode_trajectory) - 1)
+            
+            for i in range(1, propagation_depth + 1):
+                # Get the experience from i steps ago
+                idx = -(i + 1)  # -2, -3
+                if abs(idx) <= len(self.current_episode_trajectory):
+                    prev_state, prev_action, prev_reward, prev_next_state, prev_done = \
+                        self.current_episode_trajectory[idx]
+                    
+                    # Calculate propagated penalty (diminishes with distance)
+                    propagation_factor = (self.trajectory_penalty_propagation ** i)
+                    propagated_penalty = scaled_reward * propagation_factor
+                    
+                    # Only propagate if it makes the previous reward worse AND is significant
+                    if propagated_penalty < -2:  # Only propagate significant penalties
+                        adjusted_reward = prev_reward + (propagated_penalty * 0.2)  # Much smaller fraction
+                        
+                        # Store the adjusted experience
+                        self.memory.append((prev_state, prev_action, adjusted_reward, prev_next_state, prev_done))
+                        
+                        if i == 1:  # Only print for immediate previous step
+                            print(f"  🔗 Credit: {propagated_penalty:.1f} → prev action")
+        
+        # Clear trajectory if episode ended
+        if done:
+            self.current_episode_trajectory = []
 
     def act(self, state, valid_actions=None):
         """
@@ -128,11 +177,11 @@ class DQNAgent:
                     print(f"⚠️  3-ACTION CYCLE: pattern repeating - FORCING EXPLORATION")
                     oscillation_detected = True
         
-        # If oscillation detected, force random exploration for next 10 actions
+        # If oscillation detected, force random exploration for next 5 actions (reduced from 10)
         if oscillation_detected:
-            self.force_random_actions = 10
-            # Also boost epsilon temporarily to encourage more exploration
-            self.epsilon = min(1.0, self.epsilon + 0.3)
+            self.force_random_actions = 5
+            # Smaller epsilon boost (was 0.3)
+            self.epsilon = min(1.0, self.epsilon + 0.1)
         
         # Force random action if counter is active OR normal epsilon-greedy
         if self.force_random_actions > 0 or np.random.rand() <= self.epsilon:
@@ -167,12 +216,59 @@ class DQNAgent:
         return action
 
     def replay(self):
-        """Train the model using experiences in replay memory with target network."""
+        """
+        Train the model using experiences in replay memory with target network.
+        Uses BALANCED sampling - not too much focus on penalties.
+        """
         if len(self.memory) < self.batch_size:
             return
 
-        # Sample a batch of experiences
-        minibatch = random.sample(self.memory, self.batch_size)
+        # BALANCED EXPERIENCE REPLAY:
+        # Sample mostly randomly, with slight bias toward learning from mistakes
+        
+        # Separate experiences by reward type
+        penalty_experiences = []
+        neutral_experiences = []
+        reward_experiences = []
+        
+        for exp in self.memory:
+            reward = exp[2]  # reward is at index 2
+            if reward < -10:  # Significant penalties
+                penalty_experiences.append(exp)
+            elif reward < 0:  # Minor penalties or neutral
+                neutral_experiences.append(exp)
+            else:  # Positive rewards
+                reward_experiences.append(exp)
+        
+        # BALANCED composition: 30% penalties, 30% neutral, 40% rewards
+        # This ensures agent learns from successes more than failures
+        n_penalties = min(int(self.batch_size * 0.3), len(penalty_experiences))
+        n_neutral = min(int(self.batch_size * 0.3), len(neutral_experiences))
+        n_rewards = self.batch_size - n_penalties - n_neutral
+        
+        # Sample from each category
+        minibatch = []
+        
+        if len(penalty_experiences) >= n_penalties:
+            minibatch.extend(random.sample(penalty_experiences, n_penalties))
+        else:
+            minibatch.extend(penalty_experiences)
+            n_neutral += (n_penalties - len(penalty_experiences))  # Compensate with neutral
+        
+        if len(neutral_experiences) >= n_neutral:
+            minibatch.extend(random.sample(neutral_experiences, n_neutral))
+        else:
+            minibatch.extend(neutral_experiences)
+            n_rewards += (n_neutral - len(neutral_experiences))  # Compensate with rewards
+        
+        if len(reward_experiences) >= n_rewards:
+            minibatch.extend(random.sample(reward_experiences, n_rewards))
+        else:
+            minibatch.extend(reward_experiences)
+            # If still not enough, sample randomly from all
+            remaining = self.batch_size - len(minibatch)
+            if remaining > 0 and len(self.memory) >= remaining:
+                minibatch.extend(random.sample(list(self.memory), remaining))
         
         # Prepare batch arrays
         states = np.array([experience[0][0] for experience in minibatch])

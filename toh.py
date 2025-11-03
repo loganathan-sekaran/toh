@@ -57,7 +57,7 @@ class TowerOfHanoiEnv:
         # Store previous state for reward shaping
         prev_discs_on_goal = len(self.state[2])
         
-        reward = -0.1  # Small base penalty to encourage efficiency
+        reward = 0  # No base penalty - rely on completion bonus for efficiency
         done = False
 
         # Check if move is valid
@@ -120,7 +120,7 @@ class TowerOfHanoiEnv:
                     correct_position = (target_rod_state[-2] == disc + 1) and (disc + 1 in self.correctly_placed_discs)
             
             if correct_position:
-                reward += 30  # BIG REWARD for correct placement
+                reward += 10  # Reward for correct placement
                 self.correctly_placed_discs.add(disc)
                 # Update current target to next smaller disc
                 if disc > 1:
@@ -128,7 +128,7 @@ class TowerOfHanoiEnv:
         
         elif removed_from_target:
             # Removed a disc that was correctly placed - BAD!
-            reward -= 40  # HEAVY PENALTY for undoing progress
+            reward -= 15  # Penalty for undoing progress
             self.correctly_placed_discs.discard(disc)
             # Update current target back to this disc
             self.current_target_disc = disc
@@ -188,22 +188,22 @@ class TowerOfHanoiEnv:
         
         if is_largest_on_target and not was_largest_on_target:
             # Just placed largest disc on target
-            rewards_bonus.append(25)  # Big reward for getting it there
+            rewards_bonus.append(8)  # Reward for getting it there
             self.largest_disc_on_target = True
         elif not is_largest_on_target and was_largest_on_target:
             # Removed largest disc from target - BAD!
-            penalties.append(30)  # Heavy penalty for undoing progress
+            penalties.append(12)  # Penalty for undoing progress
             self.largest_disc_on_target = False
         elif is_largest_on_target and was_largest_on_target:
             # Largest disc still on target - good!
-            rewards_bonus.append(2)  # Small bonus for maintaining correct state
+            rewards_bonus.append(1)  # Small bonus for maintaining correct state
         
         # LOGIC 2: Largest disc strategy (original logic - now works with Logic 6)
         if disc == self.largest_disc:
             if to_rod == 2:
-                rewards_bonus.append(20)  # BIG reward for moving largest disc to target!
+                rewards_bonus.append(8)  # Reward for moving largest disc to target!
             else:
-                penalties.append(15)  # Penalty for moving largest disc to wrong rod
+                penalties.append(5)  # Small penalty for moving largest disc to wrong rod
         
         # Apply the MAXIMUM penalty instead of sum (prevents extreme stacking)
         if penalties:
@@ -215,37 +215,40 @@ class TowerOfHanoiEnv:
         # Reward shaping: bonus for moving discs to goal rod
         new_discs_on_goal = len(self.state[2])
         if new_discs_on_goal > prev_discs_on_goal:
-            reward += 5  # Bonus for moving a disc to the goal
-            # Extra bonus if disc is in correct position (larger discs should be at bottom)
-            if to_rod == 2 and disc == max(self.state[2]):
-                reward += 3  # Correct placement bonus
+            # Check if this move completes the puzzle (placing final disc)
+            if new_discs_on_goal == self.num_discs:
+                # This is the WINNING MOVE - big immediate reward!
+                reward += 30  # Large bonus for final disc placement (reduced from 40)
+            else:
+                reward += 2  # Small bonus for moving a disc to the goal
+                # Extra bonus if disc is in correct position (larger discs should be at bottom)
+                if to_rod == 2 and disc == max(self.state[2]):
+                    reward += 1  # Correct placement bonus
         
         # Check if puzzle is complete
         if len(self.state[2]) == self.num_discs:
-            # LOGIC 3: Reward based on efficiency compared to best performance
-            optimal_steps = self.max_steps
+            # LOGIC 3: Reward based on efficiency
+            # Optimal steps for 3 discs = 7, for 4 discs = 15, etc.
+            optimal_steps = (2 ** self.num_discs) - 1
             
-            # Compare with best previous performance
-            if self.steps < self.best_steps:
-                # New best! Huge reward
-                efficiency_bonus = (self.best_steps - self.steps) * 20
-                reward += 100 + efficiency_bonus
-                self.best_steps = self.steps  # Update best
-            elif self.steps == optimal_steps:
-                # Optimal solution!
-                reward += 200
-                self.best_steps = self.steps
+            # Simple completion reward based on efficiency
+            if self.steps <= optimal_steps:
+                # Perfect solution!
+                reward += 50
             elif self.steps <= optimal_steps * 1.5:
                 # Good solution (within 50% of optimal)
-                reward += 80
+                reward += 30
+            elif self.steps <= optimal_steps * 2:
+                # Acceptable solution
+                reward += 20
             else:
-                # Completed but inefficient
-                reward += 50
+                # Completed but very inefficient
+                reward += 10
             
             done = True
         
         # Clip reward to prevent numerical instability
-        reward = np.clip(reward, -100, 300)
+        reward = np.clip(reward, -100, 100)
         
         return self.state, reward, done, {}
 
